@@ -1,0 +1,22 @@
+# Команды для shell MyOS (QEMU). Выполнять по порядку.
+# После строки "httpserver" shell заблокирован — тесты с хоста запускайте из другого окна cmd.
+
+log info
+dhcp
+network
+ping 10.0.2.2
+write /www/test.txt hello-from-guest
+write /www/page.html <html><body><h1>Test Page</h1></body></html>
+ls /www
+httpserver 8080 32
+
+# --- Дополнительно (отдельные сессии / после httpserver) ---
+
+# Socket API echo (с хоста: tests\network\tcp-echo-test.ps1 -Port 9001)
+socktest tcp 9001
+
+# UDP echo (с хоста: PowerShell UDP или netcat)
+socktest udp 9002
+
+# HTTP-клиент из гостя
+httpget example.com

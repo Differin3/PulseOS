@@ -1,0 +1,11 @@
+# Build artifacts
+*.o
+*.iso
+iso/boot/kernel.bin
+
+# QEMU serial logs (host)
+logs/*.log
+
+# Editor
+.vscode/
+.cursor/
