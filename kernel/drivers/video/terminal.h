@@ -21,6 +21,7 @@ void terminal_scroll_down();
 void terminal_scroll_page_up();
 void terminal_scroll_page_down();
 bool terminal_in_scrollback();
+void terminal_leave_scrollback(void);
 
 size_t terminal_get_row();
 size_t terminal_get_column();

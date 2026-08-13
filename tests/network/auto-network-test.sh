@@ -98,6 +98,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
           "$ROOT/kernel/syscall.o" \
           "$ROOT/kernel/mm/paging.o" \
           "$ROOT/kernel/vga_autotest.o" \
+          "$ROOT/kernel/keyboard_autotest.o" \
           "$ROOT/kernel/drivers/video/terminal.o" \
           "$ROOT/kernel/drivers/video/fb.o" \
           "$ROOT/boot/boot.o" \
@@ -282,9 +283,16 @@ def serial_summary(text):
         ("[INF][http] idle_done", "HTTP idle shutdown"),
         ("fs_ok", "Filesystem autotest passed"),
         ("fs_failed", "Filesystem autotest failed"),
+        ("extent_ok", "FS multi-extent I/O"),
         ("symlink_ok", "FS symlink follow"),
+        ("hardlink_ok", "FS hard link"),
         ("journal_ok", "FS journal recover selftest"),
         ("fd_file_ok", "FS open/lseek/read fd API"),
+        ("fsck_ok", "FS fsck"),
+        ("cache_ok", "FS page cache sync"),
+        ("o_excl_ok", "FS O_EXCL"),
+        ("mount_tmp_ok", "ramfs /tmp"),
+        ("getdents_ok", "FS readdir/getdents"),
         ("dhcp_ok", "DHCP acquired in autotest"),
         ("dns_ok", "DNS resolve knitos.local"),
         ("ports_ok", "Port table autotest passed"),
@@ -312,6 +320,10 @@ def serial_summary(text):
         ("dhcpd_kthread_ok", "dhcpd runs as kthread"),
         ("aspace_ok", "Per-task CR3 isolation"),
         ("vga_ok", "VGA console autotest"),
+        ("keyboard_ok", "Keyboard decode autotest"),
+        ("kbd_ascii_ok", "Keyboard ASCII map"),
+        ("kbd_edit_ok", "Keyboard Backspace/Tab/Enter"),
+        ("kbd_special_ok", "Keyboard arrows/Home/End"),
         ("fb_ok", "Framebuffer graphics mode"),
         ("fb_skip", "Framebuffer skipped (text mode)"),
         ("[INF][sched] init", "Scheduler init"),
@@ -627,9 +639,16 @@ fi
 if grep -q 'PIT timer' "$SERIAL_LOG" 2>/dev/null; then pass "PIT timer boot line"; else echo "[WARN] no PIT timer status in log (VGA-only OK)"; fi
 if grep -qE 'fs_ok|\[AUTOTEST\] fs ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS autotest marker"; else fail "no fs_ok in log"; fi
 if grep -q 'fs_failed\|fs FAIL' "$SERIAL_LOG" 2>/dev/null; then fail "FS autotest reported failure"; fi
+if grep -q 'extent_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS extent marker"; else fail "no extent_ok in log"; fi
 if grep -q 'symlink_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS symlink marker"; else fail "no symlink_ok in log"; fi
+if grep -q 'hardlink_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS hardlink marker"; else fail "no hardlink_ok in log"; fi
 if grep -q 'journal_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS journal marker"; else fail "no journal_ok in log"; fi
 if grep -q 'fd_file_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS fd API marker"; else fail "no fd_file_ok in log"; fi
+if grep -q 'fsck_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS fsck marker"; else fail "no fsck_ok in log"; fi
+if grep -q 'cache_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS cache marker"; else fail "no cache_ok in log"; fi
+if grep -q 'o_excl_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS O_EXCL marker"; else fail "no o_excl_ok in log"; fi
+if grep -q 'mount_tmp_ok' "$SERIAL_LOG" 2>/dev/null; then pass "ramfs /tmp marker"; else fail "no mount_tmp_ok in log"; fi
+if grep -q 'getdents_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS getdents marker"; else fail "no getdents_ok in log"; fi
 if grep -q 'dhcp_ok\|dhcp ok' "$SERIAL_LOG" 2>/dev/null; then pass "DHCP autotest marker"; else echo "[WARN] no dhcp_ok in log"; fi
 if grep -q 'dns_ok\|dns ok' "$SERIAL_LOG" 2>/dev/null; then pass "DNS autotest marker"; else fail "no dns_ok in log"; fi
 if grep -q 'ports_ok' "$SERIAL_LOG" 2>/dev/null; then pass "Ports autotest marker"; else fail "no ports_ok in log"; fi
@@ -657,6 +676,9 @@ if grep -q 'httpd_kill_ok' "$SERIAL_LOG" 2>/dev/null; then pass "httpd kill free
 if grep -q 'dhcpd_kthread_ok' "$SERIAL_LOG" 2>/dev/null; then pass "dhcpd kthread marker"; else fail "no dhcpd_kthread_ok in log"; fi
 if grep -q 'aspace_ok' "$SERIAL_LOG" 2>/dev/null; then pass "Address-space isolation marker"; else fail "no aspace_ok in log"; fi
 if grep -q 'vga_ok' "$SERIAL_LOG" 2>/dev/null; then pass "VGA autotest marker"; else fail "no vga_ok in log"; fi
+if grep -q 'keyboard_ok' "$SERIAL_LOG" 2>/dev/null; then pass "Keyboard autotest marker"; else fail "no keyboard_ok in log"; fi
+if grep -q 'kbd_edit_ok' "$SERIAL_LOG" 2>/dev/null; then pass "Keyboard edit keys"; else fail "no kbd_edit_ok in log"; fi
+if grep -q 'kbd_special_ok' "$SERIAL_LOG" 2>/dev/null; then pass "Keyboard special keys"; else fail "no kbd_special_ok in log"; fi
 if grep -q 'fb_ok' "$SERIAL_LOG" 2>/dev/null; then
     pass "Framebuffer marker"
 elif grep -q 'fb_skip' "$SERIAL_LOG" 2>/dev/null; then

@@ -3,53 +3,77 @@
 ## Overview
 
 MOS (Magic `0x4D4F5320` / `"MOS "`) is the native on-disk filesystem for KnitOS.
-**On-disk version 2** adds mode/mtime/nlink, a write-ahead journal for metadata,
-and works with a thin VFS + POSIX-like open-file (fd) layer.
+**On-disk version 3** uses real inodes + directory entries, multi-extent allocation,
+ordered journaling (data then metadata), page cache, and works with VFS + ramfs.
 
-Old v1 images are **recreated** on boot when the layout/version does not match
+Old v1/v2 images are **recreated** on boot when the layout/version does not match
 (see serial log: `old/invalid MOS layout — recreating`).
 
-## Layout
+## Layout (v3)
 
 | Region | Description |
 |--------|-------------|
-| LBA 0 | Superblock (`fs_boot_sector`) |
-| `file_table_sector`… | Flat inode/file table (`FS_MAX_FILES` = 256) |
+| LBA 0 | Superblock (`fs_boot_sector`, version 3) |
+| `inode_table_sector`… | Inode table (`FS_MAX_INODES` = 1024) |
 | `free_bitmap_sector`… | Free-sector bitmap |
-| `log_start_sector`… | Journal (txn header + up to 16 data sectors) |
-| data… | File payloads (contiguous extents) |
+| `log_start_sector`… | Journal (txn header + up to 32 data sectors) |
+| data… | File/dir payloads, indirect extent blocks, xattr |
 
-Root is virtual (`parent_dir = 0xFFFFFFFF`); directories are table entries with
-`FS_FLAG_DIRECTORY`.
+Root inode is **1** (`FS_ROOT_INO`). Directories store packed dirents
+(`ino` + `namelen` + `name`).
 
-## Journal
+### Inode
 
-- **Metadata only** (file table chunk + first bitmap sector) via redo log.
-- Transaction: write header+copies to log → set `log_next` → write live sectors → clear `log_next`.
-- On mount, if `log_next != 0`, `fs_recover()` replays redo then clears the log.
-- File **data** is written after metadata allocation; not fully journaled.
+- `mode`, `uid`, `gid`, `nlink`, `size`, `atime`/`mtime`/`ctime`, `parent`
+- flags: file / dir / symlink / fifo / sock / blk / chr (+ `COMPRESSED` reserved)
+- **4 direct extents** `{lba,count}` + optional **indirect** extent sector
+- short symlink target in `symlink_inline` (else data extents)
+- optional `xattr_lba`
 
-## Attributes
+## Journal (ordered)
 
-- `mode` (e.g. 0644 / 0755), `mtime` (seconds since boot via PIT), `nlink`
-- Symlinks: `FS_FLAG_SYMLINK`, payload = target path; resolve depth ≤ 8
+1. Write new **data** sectors (allocate-on-write for growth/overwrite paths).
+2. Journal + commit **metadata** (inode table chunk + bitmap).
+3. On mount, if `log_next != 0`, `fs_recover()` replays redo then clears the log.
 
-## VFS / fd
+## fsck
 
-- `vfs_resolve` / path helpers in `kernel/vfs.*`
-- Open files: `vfs_open` / `vfs_fread` / `vfs_fwrite` / `vfs_lseek` / `vfs_close` (`kernel/fs_file.*`)
-- Task `TASK_FD_FILE` holds open-file handle; syscalls `SYS_OPEN/READ/WRITE/CLOSE/LSEEK/STAT/FSTAT`
+`fs_fsck(repair)` rebuilds bitmap consistency, fixes `nlink` from dirents,
+drops orphan inodes when repairing. Called on mount after recover.
+Markers: `fsck_ok` / `fsck_repaired`.
+
+## Page cache
+
+[`kernel/fs_cache.*`](../kernel/fs_cache.cpp): 256×512 B slots, dirty + LRU-ish
+eviction, `fs_sync()` / `fs_cache_sync()` flush. MOS I/O goes through the cache.
+
+## Hard links / attrs
+
+- `fs_link` / unlink with real `nlink`
+- `chmod` / `chown` / uid enforce (uid 0 bypass)
+- minimal xattr (`fs_setxattr` / `fs_getxattr`)
+
+## VFS / mounts
+
+- MOS on `/`
+- **ramfs** on `/tmp` (`FS_TYPE_RAMFS`)
+- Open-file layer: `O_EXCL`, `openat`, `dup`, `fcntl`, `getdents`, `fsync`
+- Syscalls include `SYS_DUP`, `SYS_LINK`, `SYS_OPENAT`, `SYS_GETDENTS`, `SYS_MMAP_RO` (load-to-buffer)
 
 ## Shell
 
-`ls`, `ls -l`, `cat`, `write`, `mkdir [-p]`, `rm [-r]`, `mv`, `cp`, `ln -s`, `stat`, `nano`, `find`
+`ls`, `cat`, `write`, `mkdir [-p]`, `rm [-r]`, `mv`, `cp`, `ln` / `ln -s`,
+`stat`, `chmod`, `chown`, `touch`, `df`, `du`, `sync`, `mount`, `fsck`, `nano`, `find`
 
 ## Limits
 
-- 256 files/dirs total, contiguous extents, no page cache / mmap
-- Single root mount (`mount` table ready for future fs_types)
+- 1024 inodes, multi-extent (fragmented OK), names ≤ 255
+- No full transparent compression yet (`FS_FLAG_COMPRESSED` reserved)
+- `mmap` RO is a simplified load-into-heap helper, not page-fault mapping
 
 ## Autotest
 
-`autotest fs` covers mkdir, R/W, rename, truncate, symlink, journal selftest, fd/lseek, delete.
-Markers: `fs_ok`, `symlink_ok`, `journal_ok`, `fd_file_ok`.
+`autotest fs` covers mkdir, R/W, rename, truncate, symlink, hardlink, journal,
+cache sync, fd/lseek, O_EXCL, ramfs `/tmp`, getdents, delete.
+Markers: `fs_ok`, `symlink_ok`, `journal_ok`, `fd_file_ok`, `extent_ok`,
+`hardlink_ok`, `fsck_ok`, `cache_ok`, `o_excl_ok`, `mount_tmp_ok`, `getdents_ok`.

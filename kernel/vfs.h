@@ -23,6 +23,7 @@ int vfs_unlink(const char* path);
 int vfs_mkdir(const char* path);
 int vfs_rename(const char* oldp, const char* newp);
 int vfs_symlink(const char* target, const char* linkpath);
+int vfs_link(const char* oldpath, const char* newpath);
 
 void vfs_init(void);
 

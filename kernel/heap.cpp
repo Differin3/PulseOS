@@ -30,7 +30,9 @@ static void heap_init(void) {
 
 static void heap_coalesce(void) {
     heap_block* cur = heap_head;
+    int guard = 0;
     while (cur && cur->next) {
+        if (++guard > 100000) return;
         if (cur->free && cur->next->free) {
             cur->size += sizeof(heap_block) + cur->next->size;
             cur->next = cur->next->next;
@@ -43,10 +45,15 @@ static void heap_coalesce(void) {
 extern "C" void* malloc(size_t size) {
     if (size == 0) return 0;
     heap_init();
+    /* Overflow-safe align */
+    if (size > HEAP_SIZE) return 0;
     size = align_up(size);
+    if (size > HEAP_SIZE - sizeof(heap_block)) return 0;
 
     heap_block* cur = heap_head;
+    int guard = 0;
     while (cur) {
+        if (++guard > 100000) return 0; /* corrupted freelist */
         if (cur->free && cur->size >= size) {
             size_t remain = cur->size - size;
             if (remain > sizeof(heap_block) + HEAP_ALIGN) {

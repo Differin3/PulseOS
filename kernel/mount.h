@@ -3,29 +3,26 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #define MAX_MOUNTS 8
+#define FS_TYPE_MOS   0
+#define FS_TYPE_RAMFS 1
 
-// Точка монтирования
 struct mount_point {
     char path[64];
     int disk_id;
     int partition_id;
-    uint8_t fs_type; // 0 = наша ФС, другие для будущего
+    uint8_t fs_type;
     bool active;
 } __attribute__((packed));
 
-// Монтировать файловую систему
 int mount_fs(int disk_id, const char* path);
-
-// Размонтировать файловую систему
+int mount_register(const char* path, int disk_id, uint8_t fs_type);
 int unmount_fs(const char* path);
-
-// Найти точку монтирования для пути
 const struct mount_point* get_mount_for_path(const char* path);
-
-// Инициализация системы монтирования
-int mount_init();
+int mount_init(void);
+int mount_count_active(void);
+const struct mount_point* mount_get(int index);
 
 #endif
-

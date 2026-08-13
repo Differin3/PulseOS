@@ -6,6 +6,9 @@
 #include "fs.h"
 #include "vfs.h"
 #include "fs_file.h"
+#include "ramfs.h"
+#include "mount.h"
+#include "fs_file.h"
 #include "fs_autotest.h"
 #include "utils.h"
 #include "utils/nano.h"
@@ -35,6 +38,7 @@
 #include "serial_log.h"
 #include "mm/paging.h"
 #include "vga_autotest.h"
+#include "keyboard_autotest.h"
 #include "heap.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -444,6 +448,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         print_status("FAIL", "Filesystem init failed", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
     } else if (fs_init(0) == 0) {
         vfs_init();
+        ramfs_mount_tmp();
         print_status("OK", "Filesystem initialized", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     } else {
         log_msg(LOG_ERR, "boot", "fs_init sector I/O failed");
@@ -649,75 +654,11 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         prompt_print();
     };
     
-    // Специальные коды для стрелок
-    static bool e0_prefix = false;
-    static uint32_t e0_timeout = 0;
-    
-    // Чистый polling (IRQ замаскированы) - объявляем раньше для использования в confirm_action
-    auto poll_scancode = [&]() -> char {
-        uint8_t status;
-        asm volatile ("inb %1, %0" : "=a"(status) : "Nd"((uint16_t)0x64));
-        if (status & 0x01) {
-            uint8_t scancode;
-            asm volatile ("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
-
-            if (scancode == 0xE0) {
-                e0_prefix = true;
-                e0_timeout = 1000;
-                return 0;
-            }
-
-            bool extended = e0_prefix;
-
-            if (scancode & 0x80) {
-                keyboard_modifiers_update(scancode, extended);
-                if (extended) {
-                    e0_prefix = false;
-                    e0_timeout = 0;
-                }
-                return 0;
-            }
-
-            if (scancode == 0x2A || scancode == 0x36 || scancode == 0x1D) {
-                keyboard_modifiers_update(scancode, extended);
-                e0_prefix = false;
-                e0_timeout = 0;
-                return 0;
-            }
-
-            if (extended && e0_timeout > 0) {
-                e0_prefix = false;
-                e0_timeout = 0;
-                keyboard_poll_hit();
-                if (scancode == 0x1D) {
-                    keyboard_modifiers_update(scancode, true);
-                    return 0;
-                }
-                if (scancode == 0x48) return 1;
-                if (scancode == 0x50) return 2;
-                if (scancode == 0x4B) return 3;
-                if (scancode == 0x4D) return 4;
-                if (scancode == 0x49) return 5;
-                if (scancode == 0x51) return 6;
-                return 0;
-            }
-
-            if (e0_prefix) {
-                e0_prefix = false;
-                e0_timeout = 0;
-            }
-
-            keyboard_poll_hit();
-            return keyboard_scancode_char(scancode);
-        }
-
-        if (e0_timeout > 0) {
-            e0_timeout--;
-            if (e0_timeout == 0) {
-                e0_prefix = false;
-            }
-        }
-        return 0;
+    /* Keys from IRQ software buffer (KEY_* / ASCII). Never read port 0x60 here. */
+    auto poll_key = [&]() -> char {
+        char c = keyboard_poll();
+        if (c != 0) return c;
+        return serial_poll_char();
     };
     
     // Функция подтверждения действия
@@ -728,7 +669,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         char confirm_line[16];
         size_t confirm_len = 0;
         while (confirm_len < sizeof(confirm_line) - 1) {
-            char c = poll_scancode();
+            char c = poll_key();
             if (c == '\n') {
                 confirm_line[confirm_len] = 0;
                 break;
@@ -835,7 +776,9 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  find [path] [-name P] [-type f|d]  search files");
             terminal_writestring("\n  cd <path>   pwd   cat <file>   rm [-r] <path>");
             terminal_writestring("\n  write <file> <text>   nano <file>  mkdir [-p] <path>");
-            terminal_writestring("\n  mv <a> <b>   cp <a> <b>   ln -s <t> <link>   stat <path>");
+            terminal_writestring("\n  mv <a> <b>   cp <a> <b>   ln [-s] <a> <b>   stat <path>");
+            terminal_writestring("\n  chmod <mode> <path>   chown <uid> <path>   touch <path>");
+            terminal_writestring("\n  df   du <path>   sync   mount   fsck");
             terminal_writestring("\nSystem:");
             terminal_writestring("\n  clear   echo   version   disk   reboot   shutdown");
             terminal_writestring("\n  ps                     tasks (systemd=0, idle, ...)");
@@ -877,7 +820,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 flush_line(); return;
             }
             char test_buf[64];
-            if (fs_list_dir(resolved, test_buf, sizeof(test_buf)) >= 0) {
+            if (vfs_list(resolved, test_buf, sizeof(test_buf)) >= 0) {
                 utils_set_current_directory(resolved);
             } else {
                 terminal_writestring("\ncd: ");
@@ -1318,19 +1261,126 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring(w==0 ? "\nCopied" : "\ncp failed");
             flush_line(); return;
         }
-        if (len>=6 && cmd[0]=='l'&&cmd[1]=='n'&&cmd[2]==' '&&cmd[3]=='-'&&cmd[4]=='s'&&cmd[5]==' ') {
-            char a[64], b[64]; int an=0, bn=0; size_t i=6;
+        if (len>=3 && cmd[0]=='l'&&cmd[1]=='n'&&cmd[2]==' ') {
+            bool soft = false;
+            size_t i = 3;
+            if (i+2 < len && cmd[i]=='-' && cmd[i+1]=='s' && (cmd[i+2]==' ' || cmd[i+2]==0)) {
+                soft = true;
+                i += 2;
+                while (i < len && cmd[i]==' ') i++;
+            }
+            char a[64], b[64]; int an=0, bn=0;
             while (i<len && cmd[i]!=' ' && an<63) a[an++]=cmd[i++];
             a[an]=0;
             while (i<len && cmd[i]==' ') i++;
             while (i<len && bn<63) b[bn++]=cmd[i++];
             b[bn]=0;
-            char pb[128];
+            char pa[128], pb[128];
             if (!an || !bn || utils_resolve_path(b,pb,sizeof(pb))) {
-                terminal_writestring("\nUsage: ln -s <target> <link>");
+                terminal_writestring("\nUsage: ln [-s] <target> <link>");
                 flush_line(); return;
             }
-            terminal_writestring(fs_symlink(a,pb)==0 ? "\nSymlink created" : "\nln failed");
+            if (soft) {
+                terminal_writestring(fs_symlink(a,pb)==0 ? "\nSymlink created" : "\nln failed");
+            } else {
+                if (utils_resolve_path(a,pa,sizeof(pa))) {
+                    terminal_writestring("\nln: bad target"); flush_line(); return;
+                }
+                terminal_writestring(fs_link(pa,pb)==0 ? "\nHard link created" : "\nln failed");
+            }
+            flush_line(); return;
+        }
+        if (len>=6 && cmd[0]=='c'&&cmd[1]=='h'&&cmd[2]=='m'&&cmd[3]=='o'&&cmd[4]=='d'&&cmd[5]==' ') {
+            char mode_s[16]; int mn=0; size_t i=6;
+            while (i<len && cmd[i]!=' ' && mn<15) mode_s[mn++]=cmd[i++];
+            mode_s[mn]=0;
+            while (i<len && cmd[i]==' ') i++;
+            char filename[64]; int fn=0;
+            while (i<len && fn<63) filename[fn++]=cmd[i++];
+            filename[fn]=0;
+            char fullpath[128];
+            uint16_t mode = 0;
+            for (int k=0; mode_s[k]; k++) {
+                if (mode_s[k] < '0' || mode_s[k] > '7') { mode = 0; break; }
+                mode = (uint16_t)((mode << 3) | (mode_s[k] - '0'));
+            }
+            if (!fn || !mode || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
+                terminal_writestring("\nUsage: chmod <octal> <path>"); flush_line(); return;
+            }
+            terminal_writestring(fs_chmod(fullpath, mode)==0 ? "\nOK" : "\nchmod failed");
+            flush_line(); return;
+        }
+        if (len>=6 && cmd[0]=='c'&&cmd[1]=='h'&&cmd[2]=='o'&&cmd[3]=='w'&&cmd[4]=='n'&&cmd[5]==' ') {
+            char uid_s[16]; int un=0; size_t i=6;
+            while (i<len && cmd[i]!=' ' && un<15) uid_s[un++]=cmd[i++];
+            uid_s[un]=0;
+            while (i<len && cmd[i]==' ') i++;
+            char filename[64]; int fn=0;
+            while (i<len && fn<63) filename[fn++]=cmd[i++];
+            filename[fn]=0;
+            char fullpath[128];
+            uint16_t uid = 0;
+            for (int k=0; uid_s[k]; k++) {
+                if (uid_s[k] < '0' || uid_s[k] > '9') { uid = 0xFFFF; break; }
+                uid = (uint16_t)(uid * 10 + (uid_s[k] - '0'));
+            }
+            if (!fn || uid == 0xFFFF || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
+                terminal_writestring("\nUsage: chown <uid> <path>"); flush_line(); return;
+            }
+            terminal_writestring(fs_chown(fullpath, uid, 0)==0 ? "\nOK" : "\nchown failed");
+            flush_line(); return;
+        }
+        if (len>=6 && cmd[0]=='t'&&cmd[1]=='o'&&cmd[2]=='u'&&cmd[3]=='c'&&cmd[4]=='h'&&cmd[5]==' ') {
+            char filename[64]; int fn=0;
+            for (size_t i=6;i<len&&fn<63;i++) filename[fn++]=cmd[i];
+            filename[fn]=0;
+            char fullpath[128];
+            if (!fn || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
+                terminal_writestring("\nUsage: touch <path>"); flush_line(); return;
+            }
+            terminal_writestring(fs_touch(fullpath)==0 ? "\nOK" : "\ntouch failed");
+            flush_line(); return;
+        }
+        if (len==2 && cmd[0]=='d'&&cmd[1]=='f') {
+            uint32_t t=0,u=0,f=0;
+            if (fs_get_disk_usage(&t,&u,&f)!=0) { terminal_writestring("\ndf failed"); flush_line(); return; }
+            terminal_writestring("\nFilesystem MOS");
+            terminal_writestring("\n  total: "); shell_write_u32(t);
+            terminal_writestring("\n  used:  "); shell_write_u32(u);
+            terminal_writestring("\n  free:  "); shell_write_u32(f);
+            flush_line(); return;
+        }
+        if (len>=3 && cmd[0]=='d'&&cmd[1]=='u'&&cmd[2]==' ') {
+            char filename[64]; int fn=0;
+            for (size_t i=3;i<len&&fn<63;i++) filename[fn++]=cmd[i];
+            filename[fn]=0;
+            char fullpath[128];
+            if (!fn || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
+                terminal_writestring("\nUsage: du <path>"); flush_line(); return;
+            }
+            struct fs_stat st;
+            if (fs_stat(fullpath, &st) != 0) { terminal_writestring("\ndu: not found"); flush_line(); return; }
+            terminal_writestring("\n"); shell_write_u32(st.size); terminal_writestring("\t"); terminal_writestring(fullpath);
+            flush_line(); return;
+        }
+        if (len==4 && cmd[0]=='s'&&cmd[1]=='y'&&cmd[2]=='n'&&cmd[3]=='c') {
+            terminal_writestring(fs_sync()==0 ? "\nsync ok" : "\nsync failed");
+            flush_line(); return;
+        }
+        if (len==5 && cmd[0]=='m'&&cmd[1]=='o'&&cmd[2]=='u'&&cmd[3]=='n'&&cmd[4]=='t') {
+            terminal_writestring("\nMounts:");
+            for (int mi = 0; ; mi++) {
+                const struct mount_point* mp = mount_get(mi);
+                if (!mp) break;
+                terminal_writestring("\n  ");
+                terminal_writestring(mp->path);
+                terminal_writestring(mp->fs_type == FS_TYPE_RAMFS ? " ramfs" : " mos");
+            }
+            flush_line(); return;
+        }
+        if (len==4 && cmd[0]=='f'&&cmd[1]=='s'&&cmd[2]=='c'&&cmd[3]=='k') {
+            int r = fs_fsck(true);
+            terminal_writestring(r >= 0 ? "\nfsck done" : "\nfsck failed");
             flush_line(); return;
         }
         if (len>=5 && cmd[0]=='s'&&cmd[1]=='t'&&cmd[2]=='a'&&cmd[3]=='t'&&cmd[4]==' ') {
@@ -1368,7 +1418,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             if (!fn || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
                 terminal_writestring("\nUsage: mkdir [-p] <path>"); flush_line(); return;
             }
-            terminal_writestring(fs_create_dir(fullpath)==0 ? "\nDirectory created" : "\nmkdir failed");
+            terminal_writestring(vfs_mkdir(fullpath)==0 ? "\nDirectory created" : "\nmkdir failed");
             flush_line(); return;
         }
         if (len==4 && cmd[0]=='t'&&cmd[1]=='e'&&cmd[2]=='s'&&cmd[3]=='t') {
@@ -2094,6 +2144,19 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             flush_line(); return;
         }
 
+        // autotest keyboard — PS/2 decode / specials / burst via inject
+        if (len >= 17 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
+            cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
+            cmd[9]=='k'&&cmd[10]=='e'&&cmd[11]=='y'&&cmd[12]=='b'&&cmd[13]=='o'&&
+            cmd[14]=='a'&&cmd[15]=='r'&&cmd[16]=='d' &&
+            (len == 17 || cmd[17] == ' ' || cmd[17] == 0)) {
+            if (keyboard_autotest_run() != 0) {
+                terminal_writestring("\n[AUTOTEST] keyboard failed");
+                log_msg(LOG_ERR, "autotest", "keyboard_failed");
+            }
+            flush_line(); return;
+        }
+
         // autotest network [port] [max] — CI: fs, dhcp, /www, HTTP server (markers on serial)
         if (len >= 16 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
             cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
@@ -2128,6 +2191,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             if (vga_autotest_run() != 0) {
                 terminal_writestring("\n[AUTOTEST] vga failed");
                 log_msg(LOG_ERR, "autotest", "vga_failed");
+                flush_line(); return;
+            }
+
+            if (keyboard_autotest_run() != 0) {
+                terminal_writestring("\n[AUTOTEST] keyboard failed");
+                log_msg(LOG_ERR, "autotest", "keyboard_failed");
                 flush_line(); return;
             }
 
@@ -2795,11 +2864,20 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         shell_history_len[idx] = copy;
     };
 
+    auto clear_prompt_row = [&]() {
+        /* Must not use putchar: filling term_cols spaces wraps and scrolls. */
+        size_t cols = terminal_get_width();
+        if (cols == 0) cols = 80;
+        uint8_t colr = terminal_getcolor();
+        for (size_t i = 0; i < cols; i++)
+            terminal_put_at(prompt_row, i, ' ', colr);
+    };
+
     auto set_input_line = [&](const char* text, size_t new_len) {
+        if (terminal_in_scrollback()) terminal_leave_scrollback();
+        clear_prompt_row();
         terminal_set_cursor(prompt_row, 0);
-        for (size_t i = 0; i < 80; i++) {
-            terminal_putchar(' ');
-        }
+        log_mirror_set_input(true);
         prompt_print();
         line_len = 0;
         for (size_t i = 0; i < new_len && i < sizeof(line) - 1; i++) {
@@ -2807,6 +2885,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_putchar(text[i]);
         }
         line[line_len] = 0;
+        log_mirror_set_input(false);
         tab_last_line_len = (size_t)-1;
         tab_cycle_idx = -1;
         terminal_set_cursor(prompt_row, prompt_col + line_len);
@@ -2842,14 +2921,15 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     };
 
     auto redraw_input_line = [&]() {
+        if (terminal_in_scrollback()) terminal_leave_scrollback();
+        clear_prompt_row();
         terminal_set_cursor(prompt_row, 0);
-        for (size_t i = 0; i < 80; i++) {
-            terminal_putchar(' ');
-        }
+        log_mirror_set_input(true);
         prompt_print();
         for (size_t i = 0; i < line_len; i++) {
             terminal_putchar(line[i]);
         }
+        log_mirror_set_input(false);
         terminal_set_cursor(prompt_row, prompt_col + line_len);
     };
 
@@ -3086,20 +3166,16 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         tab_last_word_start = word_start;
 
         if (match_count == 1) {
+            line_len = word_start;
             const char* full = matches[0];
-            size_t fi = 0;
-            while (full[fi] && fi < prefix_len && line[word_start + fi] == full[fi]) fi++;
-            while (full[fi] && line_len < sizeof(line) - 1) {
+            for (size_t fi = 0; full[fi] && line_len < sizeof(line) - 1; fi++)
                 line[line_len++] = full[fi];
-                terminal_putchar(full[fi++]);
-            }
-            if (first_word && add_space_after && line_len < sizeof(line) - 1) {
+            if (first_word && add_space_after && line_len < sizeof(line) - 1)
                 line[line_len++] = ' ';
-                terminal_putchar(' ');
-            }
+            line[line_len] = 0;
             tab_last_line_len = (size_t)-1;
             tab_cycle_idx = -1;
-            terminal_set_cursor(prompt_row, prompt_col + line_len);
+            redraw_input_line();
             return;
         }
 
@@ -3118,13 +3194,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         }
 
         if (common > prefix_len) {
-            for (size_t k = prefix_len; k < common && line_len < sizeof(line) - 1; k++) {
+            for (size_t k = prefix_len; k < common && line_len < sizeof(line) - 1; k++)
                 line[line_len++] = matches[0][k];
-                terminal_putchar(matches[0][k]);
-            }
+            line[line_len] = 0;
             tab_last_line_len = (size_t)-1;
             tab_cycle_idx = -1;
-            terminal_set_cursor(prompt_row, prompt_col + line_len);
+            redraw_input_line();
             return;
         }
 
@@ -3156,20 +3231,23 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             last_timer_ms = now_ms;
         }
         
-        char c = poll_scancode();
-        if (c == 0) {
-            c = serial_poll_char();
-        }
-        if (c != 0) {
-            // Обработка стрелок (1=Up, 2=Down, 3=Left, 4=Right)
-            if (c == 1) {
+        /* Drain several keys per tick so IRQ buffer does not overflow under yield/FB. */
+        for (int kdrain = 0; kdrain < 16; kdrain++) {
+            char c = poll_key();
+            if (c == 0) break;
+
+            uint8_t uc = (uint8_t)c;
+            if (uc == KEY_UP) {
                 history_up();
-            } else if (c == 2) {
+            } else if (uc == KEY_DOWN) {
                 history_down();
-            } else if (c == 5) {
+            } else if (uc == KEY_LEFT || uc == KEY_RIGHT || uc == KEY_HOME || uc == KEY_END ||
+                       uc == KEY_INSERT || (uc >= KEY_F1 && uc <= KEY_F12)) {
+                /* unused in line editor */
+            } else if (uc == KEY_PGUP) {
                 terminal_scroll_page_up();
                 refresh_status_line();
-            } else if (c == 6) {
+            } else if (uc == KEY_PGDN) {
                 terminal_scroll_page_down();
                 refresh_status_line();
             } else if (c == 12 || (keyboard_ctrl_down() && (c == 'l' || c == 'L'))) {
@@ -3181,31 +3259,38 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 shell_history_pos = -1;
                 shell_history_has_draft = false;
                 process_command(line, line_len);
-                line_len = 0; // Очищаем буфер после обработки команды
-            } else if (c == '\b') {
-                if (line_len > 0 && !(terminal_get_row() == prompt_row && terminal_get_column() == prompt_col)) {
+                line_len = 0;
+            } else if (c == '\b' || uc == KEY_DELETE) {
+                if (line_len > 0) {
+                    if (terminal_in_scrollback()) terminal_leave_scrollback();
                     line_len--;
-                    log_mirror_set_input(true);
-                    terminal_putchar('\b');
-                    log_mirror_set_input(false);
+                    line[line_len] = 0;
+                    size_t col = prompt_col + line_len;
+                    terminal_put_at(prompt_row, col, ' ', terminal_getcolor());
+                    terminal_set_cursor(prompt_row, col);
                     tab_last_line_len = (size_t)-1;
                     tab_cycle_idx = -1;
+                    shell_history_pos = -1;
                 }
             } else if (c == '\t') {
+                if (terminal_in_scrollback()) terminal_leave_scrollback();
                 tab_complete();
             } else if (c == 27) {
                 line_len = 0;
                 redraw_input_line();
                 tab_last_line_len = (size_t)-1;
                 tab_cycle_idx = -1;
-            } else {
+            } else if (uc < 0x80 && c >= 32) {
                 if (line_len < sizeof(line) - 1) {
+                    if (terminal_in_scrollback()) terminal_leave_scrollback();
                     line[line_len++] = c;
                     log_mirror_set_input(true);
+                    terminal_set_cursor(prompt_row, prompt_col + line_len - 1);
                     terminal_putchar(c);
                     log_mirror_set_input(false);
                     tab_last_line_len = (size_t)-1;
                     tab_cycle_idx = -1;
+                    shell_history_pos = -1;
                 }
             }
         }

@@ -2,6 +2,8 @@
 #include "driver_manager.h"
 #include "fs.h"
 #include "fs_file.h"
+#include "vfs.h"
+#include "heap.h"
 #include "drivers/network/socket.h"
 #include "sched/task.h"
 #include "mm/paging.h"
@@ -64,6 +66,41 @@ extern "C" int syscall_handler(struct syscall_args* args) {
 
         case SYS_FSTAT:
             return vfs_fstat((int)args->arg1, (struct fs_stat*)args->arg2);
+
+        case SYS_DUP:
+            return vfs_dup((int)args->arg1);
+        case SYS_FSYNC:
+            return vfs_fsync((int)args->arg1);
+        case SYS_LINK:
+            return fs_link((const char*)args->arg1, (const char*)args->arg2);
+        case SYS_UNLINK:
+            return vfs_unlink((const char*)args->arg1);
+        case SYS_CHMOD:
+            return fs_chmod((const char*)args->arg1, (uint16_t)args->arg2);
+        case SYS_SYNC:
+            return fs_sync();
+        case SYS_OPENAT:
+            return vfs_openat((int)args->arg1, (const char*)args->arg2, (int)args->arg3,
+                              (uint16_t)args->arg4);
+        case SYS_GETDENTS:
+            return vfs_getdents((int)args->arg1, (char*)args->arg2, (size_t)args->arg3);
+        case SYS_MMAP_RO: {
+            /* Simplified read-only file map: load into kernel buffer, return pointer */
+            const char* path = (const char*)args->arg1;
+            uint32_t* out_addr = (uint32_t*)args->arg2;
+            uint32_t* out_size = (uint32_t*)args->arg3;
+            uint32_t sz = 0;
+            if (fs_open(path, &sz) != 0 || sz == 0 || sz > 65536) return -1;
+            void* mem = malloc(sz);
+            if (!mem) return -1;
+            if (fs_read(path, mem, sz) < 0) {
+                free(mem);
+                return -1;
+            }
+            if (out_addr) *out_addr = (uint32_t)mem;
+            if (out_size) *out_size = sz;
+            return 0;
+        }
 
         case SYS_IOCTL:
             return driver_ioctl(args->arg1, args->arg2, (void*)args->arg3);

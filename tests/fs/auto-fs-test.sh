@@ -202,6 +202,13 @@ if grep -q 'fd_file_ok' "$SERIAL_LOG" 2>/dev/null; then
 else
     fail "no fd_file_ok in serial log"
 fi
+for m in extent_ok hardlink_ok fsck_ok cache_ok o_excl_ok mount_tmp_ok getdents_ok; do
+    if grep -q "$m" "$SERIAL_LOG" 2>/dev/null; then
+        pass "$m"
+    else
+        fail "no $m in serial log"
+    fi
+done
 if grep -q '\[INF\]\[fs\] init ok' "$SERIAL_LOG" 2>/dev/null; then
     pass "FS init ok at boot"
 else

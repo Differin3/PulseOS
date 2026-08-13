@@ -1,6 +1,7 @@
 #include "fb.h"
 #include "mm/paging.h"
 #include "serial_log.h"
+#include <stdint.h>
 
 /* Multiboot2 */
 #define MB2_MAGIC 0x36d76289u
@@ -243,6 +244,46 @@ void fb_clear(uint32_t rgb) {
 
 void fb_fill_cell(size_t cell_x, size_t cell_y, uint8_t vga_color) {
     fb_draw_glyph(cell_x, cell_y, ' ', vga_color);
+}
+
+void fb_scroll_cells_up(size_t cell_row0, size_t cell_rows, size_t cell_cols,
+                        size_t lines, uint8_t fill_vga) {
+    if (!g_fb.active || cell_rows < 2 || lines == 0) return;
+    if (lines >= cell_rows) lines = cell_rows - 1;
+
+    uint32_t cw = fb_cell_width();
+    uint32_t ch = fb_cell_height();
+    uint32_t px0 = g_fb.origin_x;
+    uint32_t py0 = g_fb.origin_y + (uint32_t)cell_row0 * ch;
+    uint32_t width_px = (uint32_t)cell_cols * cw;
+    if (px0 >= g_fb.width) return;
+    if (width_px > g_fb.width - px0) width_px = g_fb.width - px0;
+
+    uint32_t shift_px = (uint32_t)lines * ch;
+    uint32_t band_px = (uint32_t)cell_rows * ch;
+    if (py0 + band_px > g_fb.height) {
+        if (py0 >= g_fb.height) return;
+        band_px = g_fb.height - py0;
+    }
+    if (shift_px >= band_px) shift_px = band_px ? band_px - 1 : 0;
+
+    uint32_t bytes_pp = g_fb.bpp / 8;
+    if (bytes_pp == 0) bytes_pp = 4;
+    uint8_t* base = (uint8_t*)(uintptr_t)g_fb.addr;
+    uint32_t copy_h = band_px - shift_px;
+    uint32_t row_bytes = width_px * bytes_pp;
+
+    for (uint32_t y = 0; y < copy_h; y++) {
+        uint8_t* dst = base + (py0 + y) * g_fb.pitch + px0 * bytes_pp;
+        uint8_t* src = base + (py0 + y + shift_px) * g_fb.pitch + px0 * bytes_pp;
+        for (uint32_t i = 0; i < row_bytes; i++) dst[i] = src[i];
+    }
+
+    uint32_t bg = vga_to_rgb((fill_vga >> 4) & 0x0F);
+    for (uint32_t y = copy_h; y < band_px; y++) {
+        for (uint32_t x = 0; x < width_px; x++)
+            fb_put_pixel(px0 + x, py0 + y, bg);
+    }
 }
 
 void fb_draw_glyph(size_t cell_x, size_t cell_y, char c, uint8_t vga_color) {

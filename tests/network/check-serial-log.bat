@@ -19,6 +19,7 @@ echo ============================================
 echo.
 
 call :find_optional "fs_ok" "fs_ok" "filesystem autotest"
+call :find_optional "keyboard_ok" "keyboard_ok" "keyboard decode autotest"
 call :find_optional "virtio" "[INF][virtio] initialized" "virtio-net driver init"
 call :find_optional "rtl8139" "[INF][rtl8139]" "RTL8139 driver activity"
 call :find_pattern "dhcp" "[INF][dhcp]" "DHCP activity"

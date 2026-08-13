@@ -239,16 +239,25 @@ static void chrome_repaint(void) {
 static void terminal_scroll_content(size_t lines) {
     if (lines == 0 || content_rows == 0) return;
     size_t base = content_origin;
-    for (size_t n = 0; n < lines; n++) {
-        history_push_row_cells(base);
-        for (size_t row = 0; row + 1 < content_rows; row++) {
-            for (size_t col = 0; col < term_cols; col++)
-                cells[base + row][col] = cells[base + row + 1][col];
-            paint_row(base + row);
-        }
-        size_t last = base + content_rows - 1;
+    if (lines > content_rows) lines = content_rows;
+
+    for (size_t n = 0; n < lines; n++)
+        history_push_row_cells(base + n);
+
+    for (size_t row = 0; row + lines < content_rows; row++) {
         for (size_t col = 0; col < term_cols; col++)
-            set_cell(last, col, ' ', terminal_color);
+            cells[base + row][col] = cells[base + row + lines][col];
+    }
+    for (size_t row = content_rows - lines; row < content_rows; row++) {
+        for (size_t col = 0; col < term_cols; col++)
+            cells[base + row][col] = (uint16_t)' ' | ((uint16_t)terminal_color << 8);
+    }
+
+    if (use_fb) {
+        fb_scroll_cells_up(base, content_rows, term_cols, lines, terminal_color);
+    } else {
+        for (size_t row = 0; row < content_rows; row++)
+            paint_row(base + row);
     }
     chrome_repaint();
 }
@@ -263,6 +272,8 @@ static void terminal_render_view(size_t first_line) {
     scrollback_mode = (first_line < history_count);
     size_t base = content_origin;
 
+    /* Paint only — never write into cells[]. Overwriting cells destroyed the
+       live prompt buffer and made exit-scrollback / Up-history look broken. */
     for (size_t row = 0; row < view_h; row++) {
         size_t line_idx = first_line + row;
         for (size_t col = 0; col < term_cols; col++) {
@@ -275,10 +286,10 @@ static void terminal_render_view(size_t first_line) {
                     : ((uint16_t)' ' | ((uint16_t)terminal_color << 8));
             }
             backend_draw_cell(base + row, col, entry);
-            cells[base + row][col] = entry;
         }
     }
     chrome_repaint();
+    /* Keep logical cursor on the live prompt row (last content row). */
     terminal_row = base + (content_rows > 0 ? content_rows - 1 : 0);
     terminal_column = 0;
     terminal_update_cursor();
@@ -290,6 +301,10 @@ static void terminal_exit_scrollback() {
     view_first_line = history_count;
     for (size_t row = 0; row < content_rows; row++) paint_row(content_origin + row);
     chrome_repaint();
+}
+
+void terminal_leave_scrollback(void) {
+    terminal_exit_scrollback();
 }
 
 void terminal_scroll_up() {
@@ -554,6 +569,9 @@ void terminal_setcolor(uint8_t color) { terminal_color = color; }
 uint8_t terminal_getcolor() { return terminal_color; }
 
 void terminal_putchar(char c) {
+    /* Mirror first so serial progress is not blocked by FB scroll. */
+    log_mirror_char(c);
+
     if (scrollback_mode) terminal_exit_scrollback();
     size_t min_r = editor_mode ? 0 : content_origin;
     size_t max_r = editor_mode ? term_rows : (content_origin + content_rows);
@@ -587,7 +605,6 @@ void terminal_putchar(char c) {
         }
     }
     terminal_update_cursor();
-    log_mirror_char(c);
 }
 
 void terminal_write(const char* data, size_t size) {

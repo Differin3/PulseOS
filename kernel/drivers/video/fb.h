@@ -31,6 +31,9 @@ void fb_set_console_origin(uint32_t origin_x, uint32_t origin_y);
 void fb_clear(uint32_t rgb);
 void fb_draw_glyph(size_t cell_x, size_t cell_y, char c, uint8_t vga_color);
 void fb_fill_cell(size_t cell_x, size_t cell_y, uint8_t vga_color);
+/* Scroll a rectangular cell band up by `lines` cell-rows using memmove (fast). */
+void fb_scroll_cells_up(size_t cell_row0, size_t cell_rows, size_t cell_cols,
+                        size_t lines, uint8_t fill_vga);
 
 #define FB_FONT_W 8
 #define FB_FONT_H 16

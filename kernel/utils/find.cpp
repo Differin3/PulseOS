@@ -1,5 +1,6 @@
 #include "../utils.h"
 #include "../fs.h"
+#include "../vfs.h"
 #include "../drivers/video/terminal.h"
 #include "../kernel.h"
 #include <stdint.h>
@@ -81,7 +82,7 @@ static void find_print_if_match(const char* path, bool is_dir, const struct find
 
 static void find_walk(const char* dir_path, const struct find_options* opts) {
     char list_buf[2048];
-    if (fs_list_dir(dir_path, list_buf, sizeof(list_buf)) < 0) return;
+    if (vfs_list(dir_path, list_buf, sizeof(list_buf)) < 0) return;
 
     find_print_if_match(dir_path, true, opts);
 
@@ -174,7 +175,7 @@ int cmd_find(int argc, const char** argv) {
     }
 
     char dir_test[4];
-    if (fs_list_dir(resolved, dir_test, sizeof(dir_test)) < 0) {
+    if (vfs_list(resolved, dir_test, sizeof(dir_test)) < 0) {
         terminal_writestring("\nfind: '");
         terminal_writestring(start_path);
         terminal_writestring("': No such file or directory\n");

@@ -26,6 +26,15 @@
 #define SYS_LSEEK       18
 #define SYS_STAT        19
 #define SYS_FSTAT       20
+#define SYS_DUP         21
+#define SYS_FSYNC       22
+#define SYS_LINK        23
+#define SYS_UNLINK      24
+#define SYS_CHMOD       25
+#define SYS_SYNC        26
+#define SYS_OPENAT      27
+#define SYS_GETDENTS    28
+#define SYS_MMAP_RO     29
 
 struct syscall_args {
     uint32_t arg0;

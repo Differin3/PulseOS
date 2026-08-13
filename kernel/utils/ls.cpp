@@ -1,5 +1,6 @@
 #include "../utils.h"
 #include "../fs.h"
+#include "../vfs.h"
 #include "../drivers/video/terminal.h"
 #include "../kernel.h"
 #include <stdint.h>
@@ -76,7 +77,7 @@ static void ls_print_name(const struct ls_entry* e, bool show_long, const char* 
         for (size_t k = 0; e->name[k] && p + 1 < sizeof(full); k++) full[p++] = e->name[k];
         full[p] = 0;
         struct fs_stat st;
-        if (fs_stat(full, &st) == 0) {
+        if (vfs_stat(full, &st) == 0) {
             terminal_writestring("  mode=");
             char mb[12]; int mi = 0; uint32_t m = st.mode;
             if (!m) mb[mi++] = '0';
@@ -140,11 +141,12 @@ int cmd_ls(int argc, const char** argv) {
     }
 
     char buffer[2048];
-    if (fs_list_dir(list_path, buffer, sizeof(buffer)) < 0) {
+    terminal_writestring("\n");
+    if (vfs_list(list_path, buffer, sizeof(buffer)) < 0) {
         if (!fs_ready()) {
-            terminal_writestring("\nls: filesystem not initialized\n");
+            terminal_writestring("ls: filesystem not initialized\n");
         } else {
-            terminal_writestring("\nls: cannot access '");
+            terminal_writestring("ls: cannot access '");
             terminal_writestring(target_path ? target_path : list_path);
             terminal_writestring("': No such file or directory\n");
         }
@@ -179,7 +181,6 @@ int cmd_ls(int argc, const char** argv) {
 
     ls_sort_entries(entries, entry_count);
 
-    terminal_writestring("\n");
     if (target_path) {
         terminal_writestring(list_path);
         terminal_writestring(":\n");

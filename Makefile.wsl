@@ -64,12 +64,12 @@ HEAP_SRC = kernel/heap.cpp
 STRING_SRC = kernel/string.cpp
 KERNEL_OBJ = boot/boot.o boot/interrupts.o kernel/sched/switch.o kernel/sched/task.o \
 	kernel/kernel.o kernel/idt.o kernel/serial_log.o kernel/heap.o kernel/string.o \
-	kernel/mm/paging.o kernel/vga_autotest.o \
+	kernel/mm/paging.o kernel/vga_autotest.o kernel/keyboard_autotest.o \
 	kernel/drivers/video/fb.o \
 	kernel/drivers/pic/pic.o kernel/drivers/timer/pit.o \
 	kernel/drivers/input/keyboard.o kernel/drivers/video/terminal.o \
 	kernel/drivers/storage/ata.o kernel/drivers/storage/ahci.o kernel/drivers/storage/nvme.o \
-	kernel/drivers/pci/pci.o kernel/fs.o kernel/vfs.o kernel/fs_file.o kernel/fs_autotest.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
+	kernel/drivers/pci/pci.o kernel/fs.o kernel/fs_cache.o kernel/ramfs.o kernel/vfs.o kernel/fs_file.o kernel/fs_autotest.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
 	kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o \
 	kernel/syscall.o kernel/kernel_api.o \
 	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
@@ -144,6 +144,9 @@ kernel/drivers/video/fb.o: kernel/drivers/video/fb.cpp kernel/drivers/video/fb.h
 kernel/vga_autotest.o: kernel/vga_autotest.cpp kernel/vga_autotest.h kernel/drivers/video/terminal.h
 	$(CC) $(CFLAGS) -c -o kernel/vga_autotest.o kernel/vga_autotest.cpp
 
+kernel/keyboard_autotest.o: kernel/keyboard_autotest.cpp kernel/keyboard_autotest.h kernel/drivers/input/keyboard.h
+	$(CC) $(CFLAGS) -c -o kernel/keyboard_autotest.o kernel/keyboard_autotest.cpp
+
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)
 
@@ -156,13 +159,19 @@ kernel/drivers/storage/nvme.o: $(NVME_SRC) kernel/drivers/storage/nvme.h kernel/
 kernel/drivers/pci/pci.o: $(PCI_SRC) kernel/drivers/pci/pci.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/pci/pci.o $(PCI_SRC)
 
-kernel/fs.o: $(FS_SRC) kernel/fs.h kernel/drivers/storage/ata.h
+kernel/fs.o: $(FS_SRC) kernel/fs.h kernel/fs_cache.h kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/fs.o $(FS_SRC)
 
-kernel/vfs.o: kernel/vfs.cpp kernel/vfs.h kernel/fs.h kernel/mount.h
+kernel/fs_cache.o: kernel/fs_cache.cpp kernel/fs_cache.h kernel/fs.h kernel/drivers/storage/ata.h
+	$(CC) $(CFLAGS) -c -o kernel/fs_cache.o kernel/fs_cache.cpp
+
+kernel/ramfs.o: kernel/ramfs.cpp kernel/ramfs.h kernel/fs.h kernel/mount.h
+	$(CC) $(CFLAGS) -c -o kernel/ramfs.o kernel/ramfs.cpp
+
+kernel/vfs.o: kernel/vfs.cpp kernel/vfs.h kernel/fs.h kernel/mount.h kernel/ramfs.h
 	$(CC) $(CFLAGS) -c -o kernel/vfs.o kernel/vfs.cpp
 
-kernel/fs_file.o: kernel/fs_file.cpp kernel/fs_file.h kernel/fs.h kernel/sched/task.h
+kernel/fs_file.o: kernel/fs_file.cpp kernel/fs_file.h kernel/fs.h kernel/ramfs.h kernel/sched/task.h
 	$(CC) $(CFLAGS) -c -o kernel/fs_file.o kernel/fs_file.cpp
 
 kernel/fs_autotest.o: kernel/fs_autotest.cpp kernel/fs_autotest.h kernel/fs.h kernel/fs_file.h

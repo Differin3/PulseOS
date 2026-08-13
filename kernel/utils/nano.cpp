@@ -33,10 +33,8 @@ static char nano_prompt[NANO_PROMPT_SZ];
 static size_t nano_prompt_len = 0;
 
 static bool nano_dirty = false;
-static bool nano_e0 = false;
 static bool nano_show_lnums = true;
 static bool nano_help = false;
-static uint32_t nano_e0_timeout = 0;
 static uint32_t nano_status_ttl = 0;
 
 static size_t nano_scr_h = 25;
@@ -444,70 +442,25 @@ static void nano_draw(void) {
 }
 
 static int nano_poll_key(char* out_ch) {
-    uint8_t status;
-    asm volatile ("inb %1, %0" : "=a"(status) : "Nd"((uint16_t)0x64));
-    if (!(status & 0x01)) {
-        if (nano_e0_timeout > 0) {
-            nano_e0_timeout--;
-            if (nano_e0_timeout == 0) nano_e0 = false;
-        }
-        if (nano_status_ttl > 0) nano_status_ttl--;
-        return NANO_KEY_NONE;
-    }
+    if (nano_status_ttl > 0) nano_status_ttl--;
 
-    uint8_t scancode;
-    asm volatile ("inb %1, %0" : "=a"(scancode) : "Nd"((uint16_t)0x60));
-
-    if (scancode == 0xE0) {
-        nano_e0 = true;
-        nano_e0_timeout = 1000;
-        return NANO_KEY_NONE;
-    }
-
-    bool extended = nano_e0;
-
-    if (scancode & 0x80) {
-        keyboard_modifiers_update(scancode, extended);
-        if (extended) { nano_e0 = false; nano_e0_timeout = 0; }
-        return NANO_KEY_NONE;
-    }
-
-    if (scancode == 0x2A || scancode == 0x36 || scancode == 0x1D) {
-        keyboard_modifiers_update(scancode, extended);
-        nano_e0 = false;
-        nano_e0_timeout = 0;
-        return NANO_KEY_NONE;
-    }
-
-    if (extended && nano_e0_timeout > 0) {
-        nano_e0 = false;
-        nano_e0_timeout = 0;
-        keyboard_poll_hit();
-        if (scancode == 0x1D) {
-            keyboard_modifiers_update(scancode, true);
-            return NANO_KEY_NONE;
-        }
-        if (scancode == 0x53) return NANO_KEY_DEL;
-        if (scancode == 0x48) return NANO_KEY_UP;
-        if (scancode == 0x50) return NANO_KEY_DOWN;
-        if (scancode == 0x4B) return NANO_KEY_LEFT;
-        if (scancode == 0x4D) return NANO_KEY_RIGHT;
-        if (scancode == 0x49) return NANO_KEY_PGUP;
-        if (scancode == 0x51) return NANO_KEY_PGDN;
-        if (scancode == 0x47) return NANO_KEY_HOME;
-        if (scancode == 0x4F) return NANO_KEY_END;
-        return NANO_KEY_NONE;
-    }
-
-    if (nano_e0) { nano_e0 = false; nano_e0_timeout = 0; }
-
-    keyboard_poll_hit();
-    char c = keyboard_scancode_char(scancode);
+    char c = keyboard_poll();
     if (c == 0) return NANO_KEY_NONE;
+
+    uint8_t uc = (uint8_t)c;
+    if (uc == KEY_UP) return NANO_KEY_UP;
+    if (uc == KEY_DOWN) return NANO_KEY_DOWN;
+    if (uc == KEY_LEFT) return NANO_KEY_LEFT;
+    if (uc == KEY_RIGHT) return NANO_KEY_RIGHT;
+    if (uc == KEY_PGUP) return NANO_KEY_PGUP;
+    if (uc == KEY_PGDN) return NANO_KEY_PGDN;
+    if (uc == KEY_DELETE) return NANO_KEY_DEL;
+    if (uc == KEY_HOME) return NANO_KEY_HOME;
+    if (uc == KEY_END) return NANO_KEY_END;
 
     if (c == 27) return NANO_KEY_ESC;
 
-    if (keyboard_ctrl_down()) {
+    if (keyboard_ctrl_down() || (c >= 1 && c <= 26)) {
         char lc = c;
         if (lc >= 1 && lc <= 26) lc = (char)(lc + 'a' - 1);
         if (lc >= 'A' && lc <= 'Z') lc = (char)(lc + 32);
@@ -640,8 +593,6 @@ int nano_edit(const char* path) {
     nano_help = false;
     nano_ui = NANO_UI_EDIT;
     nano_prompt_kind = NANO_P_NONE;
-    nano_e0 = false;
-    nano_e0_timeout = 0;
     nano_status[0] = 0;
     nano_status_ttl = 0;
     nano_search[0] = 0;
