@@ -2,11 +2,12 @@
 #include "drivers/storage/ata.h"
 #include "drivers/storage/disk_manager.h"
 #include "utils.h"
+#include "serial_log.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
-#include <stdlib.h>
+#include "heap.h"
 
 static struct fs_boot_sector boot_sector;
 static struct fs_file_entry file_table[FS_MAX_FILES];
@@ -28,45 +29,6 @@ static uint32_t fs_checksum(const void* data, size_t len) {
 }
 
 // ---- Журналирование ----
-
-// Записать в журнал изменение сектора (redo-лог)
-static int fs_log_write(uint32_t sector, const void* old_data, const void* new_data) {
-    if (boot_sector.log_size == 0 || boot_sector.log_start_sector == 0) return 0; // лог не включён
-
-    // Определяем запись в журнале
-    uint32_t entry_size = sizeof(struct fs_log_entry);
-    uint32_t entries_per_sector = FS_SECTOR_SIZE / entry_size;
-    uint32_t current_slot = boot_sector.log_next;
-    uint32_t current_sector = boot_sector.log_start_sector + (current_slot / entries_per_sector);
-    uint32_t offset_in_sector = (current_slot % entries_per_sector) * entry_size;
-
-    // Если журнал заполнен, зацикливаем (но проще просто сбросить лог и пометить как старый)
-    if (current_sector >= boot_sector.log_start_sector + boot_sector.log_size) {
-        // перезаписываем с начала (старый лог теряется)
-        boot_sector.log_next = 0;
-        current_slot = 0;
-        current_sector = boot_sector.log_start_sector;
-        offset_in_sector = 0;
-    }
-
-    struct fs_log_entry entry;
-    entry.checksum = 0;
-    entry.sector = sector;
-    memcpy(entry.old_data, old_data, FS_SECTOR_SIZE);
-    memcpy(entry.new_data, new_data, FS_SECTOR_SIZE);
-    entry.checksum = fs_checksum(&entry, sizeof(entry) - sizeof(uint32_t));
-
-    // Читаем сектор, куда будем писать
-    uint8_t sector_buf[FS_SECTOR_SIZE];
-    if (disk_read_sector(current_sector, sector_buf) != 0) return -1;
-    memcpy(sector_buf + offset_in_sector, &entry, entry_size);
-    if (disk_write_sector(current_sector, sector_buf) != 0) return -1;
-
-    // Обновляем указатель следующей записи
-    boot_sector.log_next++;
-    disk_write_sector(0, &boot_sector); // обновляем суперблок
-    return 0;
-}
 
 // Применить журнал (восстановление)
 int fs_recover(void) {
@@ -131,10 +93,24 @@ static void fs_bitmap_set(uint32_t sector, int occupied) {
         bitmap[byte_idx] &= ~bit;
 }
 
+static uint32_t fs_alloc_base_sector(void) {
+    uint32_t base = boot_sector.data_start_sector;
+    if (boot_sector.log_size > 0 &&
+        boot_sector.log_start_sector + boot_sector.log_size > base) {
+        base = boot_sector.log_start_sector + boot_sector.log_size;
+    }
+    uint32_t table_sectors =
+        (FS_MAX_FILES * sizeof(struct fs_file_entry) + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE;
+    uint32_t table_end = boot_sector.file_table_sector + table_sectors;
+    if (table_end > base) base = table_end;
+    return base;
+}
+
 static int fs_alloc_blocks(uint32_t count, uint32_t* start) {
     if (!bitmap || count == 0) return -1;
     uint32_t free_run = 0;
-    for (uint32_t i = boot_sector.data_start_sector; i < boot_sector.total_sectors; i++) {
+    uint32_t base = fs_alloc_base_sector();
+    for (uint32_t i = base; i < boot_sector.total_sectors; i++) {
         if (!fs_bitmap_test(i)) {
             free_run++;
             if (free_run >= count) {
@@ -159,68 +135,35 @@ static void fs_free_blocks(uint32_t start, uint32_t count) {
 int fs_check_integrity(void) {
     if (!fs_initialized) return -1;
     int errors = 0;
-    // Проверяем битовую карту: все занятые секторы должны быть отмечены в карте
+    /* Только O(файлы × их сектора). Полный проход по всему диску
+       (sectors × FS_MAX_FILES) на 64MB образе вешает boot на минуты. */
     for (int i = 0; i < FS_MAX_FILES; i++) {
-        if (file_table[i].flags & FS_FLAG_OCCUPIED) {
-            uint32_t start = file_table[i].start_sector;
-            uint32_t count = file_table[i].sector_count;
-            for (uint32_t j = 0; j < count; j++) {
-                uint32_t sec = start + j;
-                if (!fs_bitmap_test(sec)) {
-                    errors++;
-                    // исправляем: помечаем как занятый
-                    fs_bitmap_set(sec, 1);
-                }
-            }
+        if (!(file_table[i].flags & FS_FLAG_OCCUPIED)) continue;
+        uint32_t start = file_table[i].start_sector;
+        uint32_t count = file_table[i].sector_count;
+        if (count > boot_sector.total_sectors ||
+            start >= boot_sector.total_sectors ||
+            start + count > boot_sector.total_sectors) {
+            errors++;
+            continue;
         }
-    }
-    // Проверяем, что все занятые секторы принадлежат какому-то файлу
-    for (uint32_t i = boot_sector.data_start_sector; i < boot_sector.total_sectors; i++) {
-        if (fs_bitmap_test(i)) {
-            bool found = false;
-            for (int j = 0; j < FS_MAX_FILES; j++) {
-                if (file_table[j].flags & FS_FLAG_OCCUPIED) {
-                    uint32_t start = file_table[j].start_sector;
-                    uint32_t count = file_table[j].sector_count;
-                    if (i >= start && i < start + count) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if (!found) {
+        for (uint32_t j = 0; j < count; j++) {
+            if (!fs_bitmap_test(start + j)) {
                 errors++;
-                fs_bitmap_set(i, 0); // освобождаем "потерянный" сектор
+                fs_bitmap_set(start + j, 1);
             }
         }
     }
-    if (errors > 0) {
-        // сохраняем исправленную карту
-        fs_save_bitmap();
-    }
+    if (errors > 0) fs_save_bitmap();
     return errors;
 }
 
 // ---- Таблица файлов ----
 
 static int fs_save_file_table() {
+    /* Таблица ≈ 256*272 ≈ 70KB (~136 секторов). Журнал через стек на 8
+       секторов переполнял стек и вешал boot сразу после DHCP→netcfg_save. */
     uint32_t table_sectors = (FS_MAX_FILES * sizeof(struct fs_file_entry) + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE;
-    // Сохраняем старые данные сектора таблицы для журнала
-    uint8_t old_table[FS_SECTOR_SIZE * 8]; // максимум 8 секторов
-    uint8_t new_table[FS_SECTOR_SIZE * 8];
-    memset(old_table, 0, sizeof(old_table));
-    memset(new_table, 0, sizeof(new_table));
-    // читаем старые данные (если есть)
-    disk_read_sectors(boot_sector.file_table_sector, table_sectors, old_table);
-    // копируем новую таблицу
-    memcpy(new_table, file_table, FS_MAX_FILES * sizeof(struct fs_file_entry));
-    // записываем в журнал каждый сектор отдельно
-    for (uint32_t i = 0; i < table_sectors; i++) {
-        fs_log_write(boot_sector.file_table_sector + i,
-                     old_table + i * FS_SECTOR_SIZE,
-                     new_table + i * FS_SECTOR_SIZE);
-    }
-    // записываем на диск
     if (disk_write_sectors(boot_sector.file_table_sector, table_sectors, file_table) != 0) return -1;
     if (disk_write_sector(0, &boot_sector) != 0) return -1;
     return 0;
@@ -272,13 +215,55 @@ static int fs_resolve_path_to_index(const char* path) {
 
 // ---- Публичные функции ----
 
+/* Суперблок должен описывать layout совместимый с текущим sizeof(file_table).
+   Старые образы с data_start внутри таблицы → запись файла затирается fs_save_file_table. */
+static bool fs_layout_valid(void) {
+    if (boot_sector.file_table_sector == 0 || boot_sector.free_bitmap_sector == 0)
+        return false;
+    if (boot_sector.total_sectors < 64) return false;
+    uint32_t table_sectors =
+        (FS_MAX_FILES * sizeof(struct fs_file_entry) + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE;
+    uint32_t table_end = boot_sector.file_table_sector + table_sectors;
+    if (table_end >= boot_sector.total_sectors) return false;
+    if (boot_sector.free_bitmap_sector < table_end) return false;
+    uint32_t bitmap_bytes = boot_sector.free_bitmap_size;
+    if (bitmap_bytes == 0)
+        bitmap_bytes = (boot_sector.total_sectors + 7) / 8;
+    uint32_t bitmap_secs = (bitmap_bytes + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE;
+    uint32_t bitmap_end = boot_sector.free_bitmap_sector + bitmap_secs;
+    if (bitmap_end > boot_sector.total_sectors) return false;
+    if (boot_sector.data_start_sector < bitmap_end) return false;
+    if (boot_sector.data_start_sector < table_end) return false;
+    if (boot_sector.log_size > 0) {
+        if (boot_sector.log_start_sector == 0) return false;
+        if (boot_sector.log_start_sector + boot_sector.log_size > boot_sector.total_sectors)
+            return false;
+    }
+    return true;
+}
+
+bool fs_ready(void) {
+    return fs_initialized;
+}
+
 int fs_init(int disk_id) {
     if (disk_id >= 0 && disk_select(disk_id) != 0) return -1;
     if (fs_initialized) return 0;
 
-    if (disk_read_sector(0, &boot_sector) != 0) return -1;
+    log_msg(LOG_INFO, "fs", "init read superblock");
+    if (disk_read_sector(0, &boot_sector) != 0) {
+        log_msg(LOG_ERR, "fs", "superblock read fail");
+        return -1;
+    }
 
-    if (boot_sector.magic != FS_MAGIC) {
+    bool need_create = (boot_sector.magic != FS_MAGIC);
+    if (!need_create && !fs_layout_valid()) {
+        log_msg(LOG_ERR, "fs", "invalid layout, recreating");
+        need_create = true;
+    }
+
+    if (need_create) {
+        log_msg(LOG_INFO, "fs", "create new filesystem");
         // Создание новой ФС
         boot_sector.magic = FS_MAGIC;
         boot_sector.version = 1;
@@ -337,10 +322,12 @@ int fs_init(int disk_id) {
         fs_create_dir("/home");
         fs_create_dir("/tmp");
         fs_create_dir("/www");
+        log_msg(LOG_INFO, "fs", "init ok (new)");
         return 0;
     }
 
     // ФС уже существует – загружаем таблицу
+    log_msg(LOG_INFO, "fs", "load existing filesystem");
     uint32_t table_sectors = (FS_MAX_FILES * sizeof(struct fs_file_entry) + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE;
     if (disk_read_sectors(boot_sector.file_table_sector, table_sectors, file_table) != 0) return -1;
     fs_initialized = true;
@@ -354,13 +341,11 @@ int fs_init(int disk_id) {
         fs_recover();
     }
 
-    // Проверка целостности (fsck)
-    int errors = fs_check_integrity();
-    if (errors > 0) {
-        // можно вывести предупреждение
-    }
+    // Проверка целостности (fsck) — только по таблице файлов
+    (void)fs_check_integrity();
 
     root_dir_index = 0xFFFFFFFF;
+    log_msg(LOG_INFO, "fs", "init ok");
     return 0;
 }
 
@@ -377,13 +362,25 @@ int fs_read(const char* filename, void* buffer, size_t size) {
     int idx = (filename[0] == '/') ? fs_resolve_path_to_index(filename) : fs_find_file_in_dir(filename, root_dir_index);
     if (idx < 0) return -1;
     size_t read_sz = (size < file_table[idx].size_bytes) ? size : file_table[idx].size_bytes;
-    uint32_t sectors = (read_sz + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE;
-    if (disk_read_sectors(file_table[idx].start_sector, sectors, buffer) != 0) return -1;
+    if (read_sz == 0) return 0;
+    uint32_t sectors = (uint32_t)((read_sz + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE);
+    /* disk_read always transfers full sectors — never write past caller's buffer. */
+    uint8_t* tmp = (uint8_t*)malloc(sectors * FS_SECTOR_SIZE);
+    if (!tmp) return -1;
+    if (disk_read_sectors(file_table[idx].start_sector, sectors, tmp) != 0) {
+        free(tmp);
+        return -1;
+    }
+    memcpy(buffer, tmp, read_sz);
+    free(tmp);
     return (int)read_sz;
 }
 
 int fs_write(const char* filename, const void* data, size_t size) {
     if (!fs_initialized) return -1;
+    if (!bitmap && fs_load_bitmap() != 0) {
+        return -1;
+    }
     int idx = -1;
     if (filename[0] == '/') {
         idx = fs_resolve_path_to_index(filename);
@@ -394,7 +391,9 @@ int fs_write(const char* filename, const void* data, size_t size) {
     bool is_new = (idx < 0);
     if (is_new) {
         idx = fs_find_free_slot();
-        if (idx < 0) return -1;
+        if (idx < 0) {
+            return -1;
+        }
         const char* name_start = strrchr(filename, '/');
         if (name_start) name_start++;
         else name_start = filename;
@@ -450,15 +449,11 @@ int fs_write(const char* filename, const void* data, size_t size) {
     // Запись данных
     if (size > 0) {
         uint8_t* buf = (uint8_t*)malloc(needed_sectors * FS_SECTOR_SIZE);
-        if (!buf) return -1;
+        if (!buf) {
+            return -1;
+        }
         memset(buf, 0, needed_sectors * FS_SECTOR_SIZE);
         memcpy(buf, data, size);
-        // Сохраняем старые данные секторов для журнала
-        uint8_t old_data[FS_SECTOR_SIZE];
-        for (uint32_t s = 0; s < needed_sectors; s++) {
-            disk_read_sector(file_table[idx].start_sector + s, old_data);
-            fs_log_write(file_table[idx].start_sector + s, old_data, buf + s * FS_SECTOR_SIZE);
-        }
         if (disk_write_sectors(file_table[idx].start_sector, needed_sectors, buf) != 0) {
             free(buf);
             if (is_new) {
@@ -476,8 +471,12 @@ int fs_write(const char* filename, const void* data, size_t size) {
     }
 
     // Сохраняем изменения
-    if (fs_save_bitmap() != 0) return -1;
-    if (fs_save_file_table() != 0) return -1;
+    if (fs_save_bitmap() != 0) {
+        return -1;
+    }
+    if (fs_save_file_table() != 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -518,16 +517,7 @@ int fs_delete(const char* filename) {
                 return -1;
         }
     }
-    // освобождаем секторы
     if (file_table[idx].sector_count > 0) {
-        // Записываем в журнал освобождение секторов
-        uint8_t zero_sector[FS_SECTOR_SIZE];
-        memset(zero_sector, 0, FS_SECTOR_SIZE);
-        uint8_t old_data[FS_SECTOR_SIZE];
-        for (uint32_t s = 0; s < file_table[idx].sector_count; s++) {
-            disk_read_sector(file_table[idx].start_sector + s, old_data);
-            fs_log_write(file_table[idx].start_sector + s, old_data, zero_sector);
-        }
         fs_free_blocks(file_table[idx].start_sector, file_table[idx].sector_count);
     }
     file_table[idx].flags = FS_FLAG_FREE;

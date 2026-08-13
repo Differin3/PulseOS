@@ -22,4 +22,7 @@ void rtl8139_rx_regs(struct nic_device* nic, uint8_t* cmd, uint16_t* isr, uint16
 // Поиск RTL8139 через PCI (для driver_manager)
 int find_rtl8139(struct pci_device* dev);
 
+void rtl8139_enable_irq(struct nic_device* nic);
+void rtl8139_handle_irq(struct nic_device* nic);
+
 #endif // RTL8139_H

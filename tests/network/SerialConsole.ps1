@@ -1,4 +1,4 @@
-# Bidirectional COM1 session to MyOS (QEMU -serial tcp:127.0.0.1:4444,server,nowait)
+# Bidirectional COM1 session to KnitOS (QEMU -serial tcp:127.0.0.1:4444,server,nowait)
 param(
     [string]$SerialHost = "127.0.0.1",
     [int]$Port = 4444,
@@ -81,7 +81,7 @@ function Wait-SerialPattern {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Write-Host "MyOS serial console -> ${SerialHost}:${Port}"
+    Write-Host "KnitOS serial console -> ${SerialHost}:${Port}"
     Write-Host "Type commands (exit with Ctrl+C). Log: $LogFile"
     $client = Connect-Serial -Address $SerialHost -TcpPort $Port
     $stream = $client.GetStream()

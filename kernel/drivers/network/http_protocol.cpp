@@ -13,7 +13,8 @@ static bool http_header_eq(const char* line, const char* name) {
         if (http_tolower(line[i]) != name[i]) return false;
         i++;
     }
-    return line[i] == ':' || line[i] == ' ';
+    /* hname is NUL-terminated (no ':'); full lines may end with ':' or space */
+    return line[i] == 0 || line[i] == ':' || line[i] == ' ';
 }
 
 static const char* http_skip_line(const char* req, size_t req_len, size_t* pos) {
@@ -265,7 +266,7 @@ int http_format_response_header(char* buf, size_t cap, int status,
     }
     http_put_str(buf, cap, &hp, "\r\nConnection: ");
     http_put_str(buf, cap, &hp, keep_alive ? "keep-alive" : "close");
-    http_put_str(buf, cap, &hp, "\r\nServer: MyOS-HTTP/1.1");
+    http_put_str(buf, cap, &hp, "\r\nServer: KnitOS-HTTP/1.1");
     if (status == 200 || status == 204) {
         http_put_str(buf, cap, &hp, "\r\nAccept-Ranges: bytes");
     }

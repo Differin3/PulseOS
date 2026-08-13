@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 // ----------------------------------------------
 // Файловая система MOS с журналированием и fsck
@@ -56,6 +57,7 @@ struct fs_log_entry {
 } __attribute__((packed));
 
 // Публичный интерфейс (не изменился)
+bool fs_ready(void);
 int fs_init(int disk_id);
 int fs_open(const char* filename, uint32_t* size);
 int fs_read(const char* filename, void* buffer, size_t size);

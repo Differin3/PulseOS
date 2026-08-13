@@ -38,6 +38,6 @@ if not defined WSL_ISO (
 )
 
 echo [run-qemu-test] QEMU test mode: headless + serial TCP ...
-wsl qemu-system-i386 -display gtk -cdrom "!WSL_ISO!" -drive file="!WSL_IMG!",if=none,format=raw,id=disk0 -device ich9-ahci,id=ahci0 -device ide-hd,drive=disk0,bus=ahci0.0 -netdev user,id=net0,hostfwd=tcp::8080-:8080 -device rtl8139,netdev=net0 -serial tcp:0.0.0.0:%SERIAL_PORT%,server,nowait
+wsl qemu-system-i386 -display gtk -cdrom "!WSL_ISO!" -drive file="!WSL_IMG!",if=none,format=raw,id=disk0 -device ich9-ahci,id=ahci0 -device ide-hd,drive=disk0,bus=ahci0.0 -netdev user,id=net0,hostfwd=tcp::8080-:8080 -device virtio-net-pci,disable-legacy=off,disable-modern=on,netdev=net0 -serial tcp:0.0.0.0:%SERIAL_PORT%,server,nowait
 set "RC=!errorlevel!"
 exit /b !RC!

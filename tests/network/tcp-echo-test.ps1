@@ -1,4 +1,4 @@
-# TCP echo test for MyOS socktest / tcp listen (run server in guest first).
+# TCP echo test for KnitOS socktest / tcp listen (run server in guest first).
 param(
     [string]$GuestHost = "10.0.2.15",
     [int]$Port = 9001,
@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host "============================================"
-Write-Host " MyOS TCP echo test -> ${GuestHost}:${Port}"
+Write-Host " KnitOS TCP echo test -> ${GuestHost}:${Port}"
 Write-Host " Guest: socktest tcp $Port"
 Write-Host "============================================"
 

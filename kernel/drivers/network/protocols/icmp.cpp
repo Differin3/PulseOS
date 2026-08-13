@@ -51,7 +51,7 @@ static int icmp_send_echo(uint32_t dest_ip, uint16_t id, uint16_t sequence) {
     hdr->id = htons(id);
     hdr->sequence = htons(sequence);
 
-    const char* payload = "MYOS PING";
+    const char* payload = "KNITOS PING";
     size_t payload_len = 9;
     for (size_t i = 0; i < payload_len; i++) {
         icmp_buffer[sizeof(struct icmp_header) + i] = payload[i];
@@ -61,45 +61,10 @@ static int icmp_send_echo(uint32_t dest_ip, uint16_t id, uint16_t sequence) {
     uint16_t csum = icmp_checksum(icmp_buffer, icmp_len);
     hdr->checksum = htons(csum);
 
-    uint32_t src_ip = ip_get_our_ip();
-    if (src_ip == 0) {
+    if (ip_get_our_ip() == 0) {
         return -1;
     }
-
-    uint8_t ip_buffer[sizeof(struct ip_header) + sizeof(icmp_buffer)];
-    int ip_len = ip_create_packet(ip_buffer, sizeof(ip_buffer),
-                                 src_ip, dest_ip, IP_PROTOCOL_ICMP,
-                                 icmp_buffer, icmp_len);
-    if (ip_len < 0) {
-        return -1;
-    }
-
-    uint8_t dest_mac[6];
-    uint32_t our_ip = ip_get_our_ip();
-    if (dest_ip == our_ip) {
-        nic_get_mac(dest_mac);
-    } else {
-        uint32_t arp_ip = ip_resolve_next_hop(dest_ip);
-        if (arp_ip == 0xFFFFFFFF) {
-            for (int i = 0; i < 6; i++) {
-                dest_mac[i] = 0xFF;
-            }
-        } else if (arp_resolve(arp_ip, dest_mac, 3000) != 0) {
-            return -1;
-        }
-    }
-
-    uint8_t our_mac[6];
-    nic_get_mac(our_mac);
-    uint8_t frame[sizeof(struct ethernet_header) + sizeof(ip_buffer)];
-    int frame_len = ethernet_create_frame(frame, sizeof(frame),
-                                         dest_mac, our_mac,
-                                         ETH_TYPE_IPV4, ip_buffer, ip_len);
-    if (frame_len < 0) {
-        return -1;
-    }
-
-    return nic_send_packet(frame, frame_len);
+    return ip_output(dest_ip, IP_PROTOCOL_ICMP, icmp_buffer, icmp_len);
 }
 
 void icmp_handle_packet(uint32_t src_ip, const void* payload, size_t payload_size) {
@@ -141,33 +106,10 @@ void icmp_handle_packet(uint32_t src_ip, const void* payload, size_t payload_siz
         uint16_t csum = icmp_checksum(reply, copy_len);
         rhdr->checksum = htons(csum);
 
-        uint32_t our_ip = ip_get_our_ip();
-        if (our_ip == 0) {
+        if (ip_get_our_ip() == 0) {
             return;
         }
-
-        uint8_t ip_buffer[sizeof(struct ip_header) + sizeof(reply)];
-        int ip_len = ip_create_packet(ip_buffer, sizeof(ip_buffer),
-                                     our_ip, src_ip, IP_PROTOCOL_ICMP,
-                                     reply, copy_len);
-        if (ip_len < 0) {
-            return;
-        }
-
-        uint8_t dest_mac[6];
-        if (arp_resolve(src_ip, dest_mac, 1000) != 0) {
-            return;
-        }
-
-        uint8_t our_mac[6];
-        nic_get_mac(our_mac);
-        uint8_t frame[sizeof(struct ethernet_header) + sizeof(ip_buffer)];
-        int frame_len = ethernet_create_frame(frame, sizeof(frame),
-                                             dest_mac, our_mac,
-                                             ETH_TYPE_IPV4, ip_buffer, ip_len);
-        if (frame_len >= 0) {
-            nic_send_packet(frame, frame_len);
-        }
+        ip_output(src_ip, IP_PROTOCOL_ICMP, reply, copy_len);
     }
 }
 
@@ -239,7 +181,8 @@ int icmp_ping(uint32_t dest_ip, int count) {
                 terminal_writestring("ms");
                 break;
             }
-            for (volatile int i = 0; i < 100000; i++);
+            extern void net_wait_ms(uint32_t ms);
+            net_wait_ms(10);
             attempts++;
         }
 
@@ -249,7 +192,8 @@ int icmp_ping(uint32_t dest_ip, int count) {
         }
 
         icmp_pending.waiting = false;
-        for (volatile int i = 0; i < 500000; i++);
+        extern void net_wait_ms(uint32_t ms);
+        net_wait_ms(200);
     }
 
     return received_total;

@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ============================================================
-echo   MyOS: build + automated network test (CMD)
+echo   KnitOS: build + automated network test (CMD)
 echo ============================================================
 echo.
 echo   Usage:

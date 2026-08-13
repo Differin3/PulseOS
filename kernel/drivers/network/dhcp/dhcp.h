@@ -109,4 +109,8 @@ bool dhcp_accepts_dest_ip(uint32_t dest_ip);
 // Фоновый poll: renew аренды
 void dhcp_poll();
 
+/* dhcpd kthread: background renew; returns pid or <0 */
+int dhcp_start_service(void);
+int dhcp_service_pid(void);
+
 #endif

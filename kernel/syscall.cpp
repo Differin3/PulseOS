@@ -2,6 +2,8 @@
 #include "driver_manager.h"
 #include "fs.h"
 #include "drivers/network/socket.h"
+#include "sched/task.h"
+#include "mm/paging.h"
 #include <stddef.h>
 
 // Внешняя функция из ассемблера
@@ -40,14 +42,16 @@ extern "C" int syscall_handler(struct syscall_args* args) {
             uint32_t* file_size = (uint32_t*)args->arg2;
             
             if (filename && file_size) {
-                return fs_open(filename, file_size);
+                int rc = fs_open(filename, file_size);
+                if (rc != 0) return -1;
+                int fd = task_fd_alloc(TASK_FD_FILE, -1, filename);
+                return (fd >= 0) ? fd : 0;
             }
             return -1;
         }
         
         case SYS_CLOSE: {
-            // Пока не реализовано, просто возвращаем успех
-            return 0;
+            return task_fd_close((int)args->arg1);
         }
         
         case SYS_IOCTL: {
@@ -82,7 +86,9 @@ extern "C" int syscall_handler(struct syscall_args* args) {
         }
 
         case SYS_SOCKET: {
-            return socket_create((int)args->arg1, (int)args->arg2, (int)args->arg3);
+            int s = socket_create((int)args->arg1, (int)args->arg2, (int)args->arg3);
+            if (s >= 0) task_fd_alloc(TASK_FD_SOCK, s, 0);
+            return s;
         }
 
         case SYS_BIND: {
@@ -114,6 +120,21 @@ extern "C" int syscall_handler(struct syscall_args* args) {
 
         case SYS_SOCK_CLOSE: {
             return socket_close((int)args->arg1);
+        }
+
+        case SYS_EXIT: {
+            task_exit();
+            return 0;
+        }
+
+        case SYS_YIELD: {
+            sched_yield();
+            return 0;
+        }
+
+        case SYS_RING3_DONE: {
+            paging_ring3_finish(); /* does not return */
+            return 0;
         }
         
         default:

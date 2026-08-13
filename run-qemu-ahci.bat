@@ -30,7 +30,7 @@ if not defined WSL_ISO (
 )
 
 echo [run-qemu-ahci] QEMU with ich9-ahci + raw disk (myos.img) ...
-wsl qemu-system-i386 -cdrom "!WSL_ISO!" -drive file="!WSL_IMG!",if=none,format=raw,id=disk0 -device ich9-ahci,id=ahci0 -device ide-hd,drive=disk0,bus=ahci0.0 -netdev user,id=net0 -device rtl8139,netdev=net0 -serial file:"!WSL_LOG!"
+wsl qemu-system-i386 -cdrom "!WSL_ISO!" -drive file="!WSL_IMG!",if=none,format=raw,id=disk0 -device ich9-ahci,id=ahci0 -device ide-hd,drive=disk0,bus=ahci0.0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=off,disable-modern=on,netdev=net0 -serial file:"!WSL_LOG!"
 set "RC=!errorlevel!"
 if !RC! neq 0 exit /b !RC!
 echo [run-qemu-ahci] Done.

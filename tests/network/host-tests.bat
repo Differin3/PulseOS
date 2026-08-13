@@ -25,7 +25,7 @@ if errorlevel 1 (
 )
 
 echo ============================================
-echo  MyOS network host tests
+echo  KnitOS network host tests
 echo  Target: %BASE%
 echo  Time:   %DATE% %TIME%
 echo ============================================
@@ -46,6 +46,7 @@ call :test_404
 call :test_post_echo
 call :test_put_file
 call :test_gzip
+call :test_ports
 call :test_access_log
 call :test_keepalive
 call :test_http11_header
@@ -76,14 +77,14 @@ if errorlevel 1 (
 exit /b 0
 
 :test_get_index
-echo [--] GET / ^(expect 200 + MyOS^) ...
+echo [--] GET / ^(expect 200 + KnitOS^) ...
 curl -sf --max-time 5 "%BASE%/" -o "%TEMP%\myos_index.html" 2>nul
 if errorlevel 1 (
     echo [FAIL] GET / failed — is httpserver STILL running in QEMU? ^(no shell prompt^)
     set /a FAIL+=1
     exit /b 0
 )
-findstr /I /C:"MyOS" "%TEMP%\myos_index.html" >nul 2>&1
+findstr /I /C:"KnitOS" "%TEMP%\myos_index.html" >nul 2>&1
 if errorlevel 1 goto :fail_get_index
 for /f %%C in ('curl -s -o nul -w "%%{http_code}" --max-time 5 "%BASE%/"') do set "CODE=%%C"
 if not "!CODE!"=="200" goto :fail_get_index
@@ -93,11 +94,11 @@ if errorlevel 1 (
     set /a FAIL+=1
     exit /b 0
 )
-echo [PASS] GET / -> !CODE! with MyOS body + Content-Type
+echo [PASS] GET / -> !CODE! with KnitOS body + Content-Type
 set /a PASS+=1
 exit /b 0
 :fail_get_index
-echo [FAIL] GET / bad status or body missing MyOS
+echo [FAIL] GET / bad status or body missing KnitOS
 set /a FAIL+=1
 exit /b 0
 
@@ -224,13 +225,49 @@ if errorlevel 1 (
     set /a FAIL+=1
     exit /b 0
 )
-findstr /I /C:"MyOS" "%TEMP%\myos_gz.html" >nul
+findstr /I /C:"KnitOS" "%TEMP%\myos_gz.html" >nul
 if errorlevel 1 (
-    echo [FAIL] gzip body missing MyOS
+    echo [FAIL] gzip body missing KnitOS
     set /a FAIL+=1
     exit /b 0
 )
 echo [PASS] gzip decompress OK
+set /a PASS+=1
+exit /b 0
+
+:test_ports
+echo [--] GET /api/ports ...
+curl -sf --max-time 8 "%BASE%/api/ports" -o "%TEMP%\myos_ports.txt" 2>nul
+if errorlevel 1 (
+    echo [FAIL] /api/ports request failed
+    set /a FAIL+=1
+    exit /b 0
+)
+findstr /C:"httpd" "%TEMP%\myos_ports.txt" >nul
+if errorlevel 1 (
+    echo [FAIL] /api/ports missing httpd
+    set /a FAIL+=1
+    exit /b 0
+)
+findstr /C:":%HTTP_PORT%" "%TEMP%\myos_ports.txt" >nul
+if errorlevel 1 (
+    echo [FAIL] /api/ports missing :%HTTP_PORT%
+    set /a FAIL+=1
+    exit /b 0
+)
+findstr /C:"LISTEN" "%TEMP%\myos_ports.txt" >nul
+if errorlevel 1 (
+    echo [FAIL] /api/ports missing LISTEN
+    set /a FAIL+=1
+    exit /b 0
+)
+findstr /C:"dhcpd" "%TEMP%\myos_ports.txt" >nul
+if errorlevel 1 (
+    echo [FAIL] /api/ports missing dhcpd
+    set /a FAIL+=1
+    exit /b 0
+)
+echo [PASS] /api/ports OK
 set /a PASS+=1
 exit /b 0
 
@@ -272,9 +309,9 @@ exit /b 0
 
 :test_http11_header
 echo [--] Server header ^(HTTP/1.1^) ...
-curl -sI --max-time 5 "%BASE%/" 2>nul | findstr /I /C:"Server: MyOS-HTTP/1.1" >nul
+curl -sI --max-time 5 "%BASE%/" 2>nul | findstr /I /C:"Server: KnitOS-HTTP/1.1" >nul
 if errorlevel 1 (
-    echo [FAIL] Server: MyOS-HTTP/1.1 not found
+    echo [FAIL] Server: KnitOS-HTTP/1.1 not found
     set /a FAIL+=1
     exit /b 0
 )

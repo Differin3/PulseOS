@@ -3,8 +3,11 @@
 #include "protocols/tcp_connection.h"
 #include "protocols/udp.h"
 #include "protocols/ip.h"
+#include "core/net_ports.h"
 #include "nic.h"
 #include "dhcp/dhcp.h"
+#include "sched/task.h"
+#include "drivers/timer/pit.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -34,9 +37,21 @@ struct socket_entry {
     int udp_q_head;
     int udp_q_tail;
     int udp_q_count;
+    int owner_pid;
+    char owner[NET_OWNER_MAX];
 };
 
 static struct socket_entry sockets[SOCKET_MAX];
+
+static void socket_copy_owner(char* dst, const char* src) {
+    size_t i = 0;
+    if (!src) src = "systemd";
+    while (src[i] && i + 1 < NET_OWNER_MAX) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
 
 static void socket_reset(struct socket_entry* s) {
     s->used = false;
@@ -52,9 +67,15 @@ static void socket_reset(struct socket_entry* s) {
     s->udp_q_head = 0;
     s->udp_q_tail = 0;
     s->udp_q_count = 0;
+    {
+        int cur = sched_current_id();
+        s->owner_pid = cur >= 0 ? cur : 0;
+    }
+    socket_copy_owner(s->owner, "systemd");
 }
 
 void socket_init(void) {
+    net_ports_init();
     for (int i = 0; i < SOCKET_MAX; i++) {
         socket_reset(&sockets[i]);
     }
@@ -93,7 +114,12 @@ static struct socket_entry* socket_find_udp_port(uint16_t port) {
 }
 
 static void socket_delay(void) {
-    for (volatile int j = 0; j < 80000; j++);
+    extern void net_wait_ms(uint32_t ms);
+    net_wait_ms(10);
+}
+
+static uint8_t socket_proto(const struct socket_entry* s) {
+    return s->type == SOCK_STREAM ? NET_PROTO_TCP : NET_PROTO_UDP;
 }
 
 int socket_create(int domain, int type, int protocol) {
@@ -106,18 +132,63 @@ int socket_create(int domain, int type, int protocol) {
     return fd;
 }
 
+int socket_set_owner(int fd, const char* name, int pid) {
+    struct socket_entry* s = socket_get(fd);
+    if (!s) return -1;
+    socket_copy_owner(s->owner, name);
+    if (pid < 0) {
+        int cur = sched_current_id();
+        s->owner_pid = cur >= 0 ? cur : 0;
+    } else {
+        s->owner_pid = pid;
+    }
+    if (s->local_port != 0) {
+        uint8_t st = s->listening ? NETPORT_LISTEN :
+                     (s->has_peer ? NETPORT_ESTABLISHED : NETPORT_LISTEN);
+        net_ports_register(socket_proto(s), st,
+                           s->local_ip, s->local_port,
+                           s->peer_ip, s->peer_port,
+                           fd, s->owner_pid, s->owner);
+    }
+    return 0;
+}
+
+int socket_getsockname(int fd, struct sockaddr_in* addr) {
+    struct socket_entry* s = socket_get(fd);
+    if (!s || !addr) return -1;
+    addr->sin_family = AF_INET;
+    addr->sin_port = s->local_port;
+    addr->sin_addr = s->local_ip ? s->local_ip : ip_get_our_ip();
+    return 0;
+}
+
 int socket_bind(int fd, const struct sockaddr_in* addr) {
     struct socket_entry* s = socket_get(fd);
     if (!s || !addr) return -1;
-    if (addr->sin_port == 0) return -1;
+
+    uint8_t proto = socket_proto(s);
+    uint16_t port = addr->sin_port;
+    if (port == 0) {
+        port = net_ports_alloc_ephemeral(proto);
+        if (port == 0) return -1;
+    }
+
+    if (net_ports_busy(proto, port)) return -1;
 
     for (int i = 0; i < SOCKET_MAX; i++) {
         if (i == fd || !sockets[i].used) continue;
-        if (sockets[i].local_port == addr->sin_port) return -1;
+        if (sockets[i].type == s->type && sockets[i].local_port == port) return -1;
     }
 
-    s->local_port = addr->sin_port;
+    s->local_port = port;
     s->local_ip = addr->sin_addr ? addr->sin_addr : ip_get_our_ip();
+
+    if (net_ports_register(proto, NETPORT_LISTEN,
+                           s->local_ip, s->local_port, 0, 0,
+                           fd, s->owner_pid, s->owner) != 0) {
+        s->local_port = 0;
+        return -1;
+    }
     return 0;
 }
 
@@ -132,6 +203,9 @@ int socket_listen(int fd, int backlog) {
     if (!lc) return -1;
     s->listen_tcp = lc;
     s->listening = true;
+    net_ports_register(NET_PROTO_TCP, NETPORT_LISTEN,
+                       s->local_ip, s->local_port, 0, 0,
+                       fd, s->owner_pid, s->owner);
     return 0;
 }
 
@@ -139,10 +213,11 @@ int socket_accept(int fd, int timeout_ms) {
     struct socket_entry* s = socket_get(fd);
     if (!s || s->type != SOCK_STREAM || !s->listen_tcp) return -1;
 
-    int attempts = timeout_ms > 0 ? timeout_ms / 50 : 200;
-    if (attempts < 1) attempts = 1;
+    /* Wall-clock wait: old attempt*(50ms) math was ~5x shorter than timeout_ms. */
+    uint32_t wait_ms = timeout_ms > 0 ? (uint32_t)timeout_ms : 10000u;
+    uint32_t start = timer_ms();
 
-    for (int i = 0; i < attempts; i++) {
+    while (timer_ms_since(start) < wait_ms) {
         socket_service_network();
         struct tcp_connection* accepted = tcp_connection_accept_pending(s->local_port, s->listen_tcp);
         if (accepted) {
@@ -150,7 +225,9 @@ int socket_accept(int fd, int timeout_ms) {
             int cfd = socket_alloc();
             if (cfd < 0) {
                 accepted->pending_accept = true;
-                return -1;
+                /* Keep waiting — do not treat alloc pressure as full accept timeout. */
+                socket_delay();
+                continue;
             }
             struct socket_entry* cs = &sockets[cfd];
             cs->type = SOCK_STREAM;
@@ -160,9 +237,16 @@ int socket_accept(int fd, int timeout_ms) {
             cs->peer_port = accepted->dest_port;
             cs->has_peer = true;
             cs->tcp = accepted;
+            cs->owner_pid = s->owner_pid;
+            socket_copy_owner(cs->owner, s->owner);
+            net_ports_register(NET_PROTO_TCP, NETPORT_ESTABLISHED,
+                               cs->local_ip, cs->local_port,
+                               cs->peer_ip, cs->peer_port,
+                               cfd, cs->owner_pid, cs->owner);
             return cfd;
         }
         socket_delay();
+        sched_maybe_preempt();
     }
     return -1;
 }
@@ -178,8 +262,14 @@ int socket_connect(int fd, const struct sockaddr_in* addr, int timeout_ms) {
 
     if (s->type == SOCK_DGRAM) {
         if (s->local_port == 0) {
-            s->local_port = (uint16_t)(49152 + (fd * 137) % 16384);
+            s->local_port = net_ports_alloc_ephemeral(NET_PROTO_UDP);
+            if (s->local_port == 0) return -1;
+            s->local_ip = ip_get_our_ip();
         }
+        net_ports_register(NET_PROTO_UDP, NETPORT_ESTABLISHED,
+                           s->local_ip, s->local_port,
+                           s->peer_ip, s->peer_port,
+                           fd, s->owner_pid, s->owner);
         return 0;
     }
 
@@ -188,14 +278,24 @@ int socket_connect(int fd, const struct sockaddr_in* addr, int timeout_ms) {
     struct tcp_connection* conn = tcp_connect(addr->sin_addr, addr->sin_port);
     if (!conn) return -1;
 
+    net_ports_register(NET_PROTO_TCP, NETPORT_SYN_SENT,
+                       conn->src_ip, conn->src_port,
+                       addr->sin_addr, addr->sin_port,
+                       fd, s->owner_pid, s->owner);
+
     if (tcp_connect_wait(conn, timeout_ms > 0 ? timeout_ms : 5000) != 0) {
         tcp_close(conn);
+        net_ports_release_sock(fd);
         return -1;
     }
 
     s->tcp = conn;
     s->local_port = conn->src_port;
     s->local_ip = conn->src_ip;
+    net_ports_register(NET_PROTO_TCP, NETPORT_ESTABLISHED,
+                       s->local_ip, s->local_port,
+                       s->peer_ip, s->peer_port,
+                       fd, s->owner_pid, s->owner);
     return 0;
 }
 
@@ -206,7 +306,13 @@ int socket_send(int fd, const void* buf, size_t len) {
     if (s->type == SOCK_DGRAM) {
         if (!s->has_peer) return -1;
         if (s->local_port == 0) {
-            s->local_port = (uint16_t)(49152 + (fd * 137) % 16384);
+            s->local_port = net_ports_alloc_ephemeral(NET_PROTO_UDP);
+            if (s->local_port == 0) return -1;
+            s->local_ip = ip_get_our_ip();
+            net_ports_register(NET_PROTO_UDP, NETPORT_ESTABLISHED,
+                               s->local_ip, s->local_port,
+                               s->peer_ip, s->peer_port,
+                               fd, s->owner_pid, s->owner);
         }
         if (udp_send(s->peer_ip, s->local_port, s->peer_port, buf, len) != 0) return -1;
         return (int)len;
@@ -269,8 +375,20 @@ int socket_close(int fd) {
         tcp_connection_close(s->listen_tcp);
         s->listen_tcp = 0;
     }
+    net_ports_release_sock(fd);
     socket_reset(s);
     return 0;
+}
+
+int socket_close_by_pid(int pid) {
+    if (pid < 0) return 0;
+    int n = 0;
+    for (int i = 0; i < SOCKET_MAX; i++) {
+        if (!sockets[i].used) continue;
+        if (sockets[i].owner_pid != pid) continue;
+        if (socket_close(i) == 0) n++;
+    }
+    return n;
 }
 
 int socket_get_peer(int fd, uint32_t* ip, uint16_t* port) {

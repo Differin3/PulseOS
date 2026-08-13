@@ -168,35 +168,10 @@ int tcp_send(uint32_t dest_ip, uint16_t src_port, uint16_t dest_port,
                                     payload, payload_size);
     if (tcp_len < 0) return -1;
     
-    // Вычисляем checksum
     uint32_t src_ip = ip_get_our_ip();
     struct tcp_header* tcp_hdr = (struct tcp_header*)tcp_buffer;
     tcp_hdr->checksum = htons(tcp_checksum(src_ip, dest_ip, tcp_hdr, tcp_len));
-    
-    // Создаем IP пакет
-    uint8_t ip_buffer[sizeof(struct ip_header) + sizeof(tcp_buffer)];
-    int ip_len = ip_create_packet(ip_buffer, sizeof(ip_buffer),
-                                 src_ip, dest_ip, IP_PROTOCOL_TCP,
-                                 tcp_buffer, tcp_len);
-    if (ip_len < 0) return -1;
-    
-    // Получаем MAC адрес через ARP
-    uint8_t dest_mac[6];
-    if (arp_resolve(ip_resolve_next_hop(dest_ip), dest_mac, 3000) != 0) {
-        return -1;
-    }
-    
-    // Создаем Ethernet фрейм
-    uint8_t our_mac[6];
-    nic_get_mac(our_mac);
-    uint8_t frame[sizeof(struct ethernet_header) + sizeof(ip_buffer)];
-    int frame_len = ethernet_create_frame(frame, sizeof(frame),
-                                         dest_mac, our_mac,
-                                         ETH_TYPE_IPV4, ip_buffer, ip_len);
-    if (frame_len < 0) return -1;
-    
-    // Отправляем через NIC
-    return nic_send_packet(frame, frame_len);
+    return ip_output(dest_ip, IP_PROTOCOL_TCP, tcp_buffer, (size_t)tcp_len);
 }
 
 // Обработать входящий TCP пакет
@@ -412,7 +387,8 @@ int tcp_connect_wait(struct tcp_connection* conn, int timeout_ms) {
             return -1;
         }
         
-        for (volatile int j = 0; j < 100000; j++);
+        extern void net_wait_ms(uint32_t ms);
+        net_wait_ms(10);
     }
     
     return -1;
@@ -448,7 +424,8 @@ struct tcp_connection* tcp_accept(struct tcp_connection* listen_conn, int timeou
             return accepted;
         }
 
-        for (volatile int j = 0; j < 100000; j++);
+        extern void net_wait_ms(uint32_t ms);
+        net_wait_ms(10);
     }
 
     return NULL;
@@ -539,7 +516,8 @@ void tcp_close(struct tcp_connection* conn) {
             if (conn->state == TCP_FIN_WAIT_2 || conn->state == TCP_CLOSED) {
                 break;
             }
-            for (volatile int j = 0; j < 50000; j++);
+            extern void net_wait_ms(uint32_t ms);
+            net_wait_ms(10);
         }
     }
 

@@ -4,6 +4,7 @@
 #include "arp.h"
 #include "../nic.h"  // для ETH_MAX_PACKET_SIZE и nic_get_mac
 #include "../socket.h"
+#include "../core/net_ports.h"
 #include "serial_log.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -29,6 +30,9 @@ int udp_listen_port(uint16_t port) {
     for (int i = 0; i < UDP_MAX_LISTEN_PORTS; i++) {
         if (udp_listen_ports[i] == 0) {
             udp_listen_ports[i] = port;
+            net_ports_register(NET_PROTO_UDP, NETPORT_LISTEN,
+                               ip_get_our_ip(), port, 0, 0,
+                               -1, -1, "udplisten");
             return 0;
         }
     }
@@ -39,6 +43,7 @@ void udp_unlisten_port(uint16_t port) {
     for (int i = 0; i < UDP_MAX_LISTEN_PORTS; i++) {
         if (udp_listen_ports[i] == port) {
             udp_listen_ports[i] = 0;
+            net_ports_release_listen(NET_PROTO_UDP, port);
             return;
         }
     }
@@ -170,43 +175,12 @@ int udp_send(uint32_t dest_ip, uint16_t src_port, uint16_t dest_port,
     }
     udp_hdr->checksum = htons(csum);
 
-    // Создаем IP пакет (src_ip может быть 0 для DHCP DISCOVER)
-    uint8_t ip_buffer[sizeof(struct ip_header) + sizeof(udp_buffer)];
-    int ip_len = ip_create_packet(ip_buffer, sizeof(ip_buffer),
-                                 src_ip, dest_ip, IP_PROTOCOL_UDP,
-                                 udp_buffer, udp_len);
-    if (ip_len < 0) return -1;
-    
-    // Получаем MAC адрес получателя
-    uint8_t dest_mac[6];
-    
-    // Для broadcast адреса используем broadcast MAC
-    if (dest_ip == 0xFFFFFFFF) {
-        for (int i = 0; i < 6; i++) {
-            dest_mac[i] = 0xFF;
-        }
-    } else if (arp_resolve(ip_resolve_next_hop(dest_ip), dest_mac, 3000) != 0) {
-        log_ip(LOG_ERR, "udp", "ARP resolve failed", dest_ip);
-        return -1;
-    }
-    
-    // Создаем Ethernet фрейм
-    uint8_t our_mac[6];
-    nic_get_mac(our_mac);
-    uint8_t frame[sizeof(struct ethernet_header) + sizeof(ip_buffer)];
-    int frame_len = ethernet_create_frame(frame, sizeof(frame),
-                                         dest_mac, our_mac,
-                                         ETH_TYPE_IPV4, ip_buffer, ip_len);
-    if (frame_len < 0) return -1;
-
-    // Отправляем через NIC
-    int result = nic_send_packet(frame, frame_len);
+    int result = ip_output(dest_ip, IP_PROTOCOL_UDP, udp_buffer, (size_t)udp_len);
     if (result < 0) {
-        log_fmt3(LOG_ERR, "udp", "nic send failed", "frame", (uint32_t)frame_len, "dport", (uint32_t)dest_port, "sport", (uint32_t)src_port);
+        log_fmt3(LOG_ERR, "udp", "ip_output failed", "len", (uint32_t)udp_len, "dport", (uint32_t)dest_port, "sport", (uint32_t)src_port);
         return -1;
     }
-
-    log_fmt3(LOG_DBG, "udp", "sent", "frame", (uint32_t)frame_len, "dport", (uint32_t)dest_port, "sport", (uint32_t)src_port);
+    log_fmt3(LOG_DBG, "udp", "sent", "len", (uint32_t)udp_len, "dport", (uint32_t)dest_port, "sport", (uint32_t)src_port);
     return 0;
 }
 

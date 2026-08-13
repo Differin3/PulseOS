@@ -1,9 +1,9 @@
 #include "tcp_connection.h"
 #include "tcp.h"
+#include "drivers/timer/pit.h"
 #include <stddef.h>
 
 static struct tcp_connection tcp_connections[TCP_MAX_CONNECTIONS];
-static uint32_t tcp_time_counter = 0;
 
 // Глобальная переменная для ISN (используется в tcp.cpp)
 uint32_t tcp_next_isn = 1000;  // Initial Sequence Number
@@ -19,14 +19,13 @@ void tcp_connection_init() {
     }
 }
 
-// Получить текущее время
+// Время в миллисекундах (PIT jiffies)
 uint32_t tcp_get_time() {
-    return tcp_time_counter;
+    return timer_ms();
 }
 
-// Увеличить счетчик времени (вызывать периодически)
 void tcp_increment_time() {
-    tcp_time_counter++;
+    // retained for API compatibility; PIT advances time
 }
 
 // Создать новое TCP соединение

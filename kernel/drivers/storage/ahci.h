@@ -54,7 +54,9 @@ struct pci_device;
 
 #define AHCI_MAX_PORTS 2
 #define AHCI_CMD_SLOTS 32
-#define AHCI_IO_MAX_WAIT 10000
+/* Busy-wait (IRQ ещё выключены на boot). Write на myos.img через WSL/NTFS
+   намного медленнее read — 10k итераций давали ложный command timeout. */
+#define AHCI_IO_MAX_WAIT 5000000
 
 struct ahci_port_state;
 

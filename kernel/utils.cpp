@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "sched/task.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -41,22 +42,25 @@ int execute_builtin(const char* name, int argc, const char** argv) {
     return cmd->handler(argc, argv);
 }
 
-// Текущая директория
-static char current_directory[128] = "/";
+/* Fallback before sched_init */
+static char g_cwd_fallback[128] = "/";
 
-// Получить текущую директорию
 const char* utils_get_current_directory() {
-    return current_directory;
+    if (sched_ready()) return task_getcwd();
+    return g_cwd_fallback;
 }
 
-// Установить текущую директорию
 void utils_set_current_directory(const char* path) {
+    if (sched_ready()) {
+        task_chdir(path);
+        return;
+    }
     int i = 0;
-    while (path[i] && i < 127) {
-        current_directory[i] = path[i];
+    while (path && path[i] && i < 127) {
+        g_cwd_fallback[i] = path[i];
         i++;
     }
-    current_directory[i] = 0;
+    g_cwd_fallback[i] = 0;
 }
 
 int utils_resolve_path(const char* path, char* out, size_t out_size) {
@@ -72,7 +76,7 @@ int utils_resolve_path(const char* path, char* out, size_t out_size) {
         return 0;
     }
 
-    const char* cwd = current_directory;
+    const char* cwd = utils_get_current_directory();
     size_t p = 0;
     while (cwd[p] && p + 1 < out_size) {
         out[p] = cwd[p];
@@ -89,14 +93,11 @@ int utils_resolve_path(const char* path, char* out, size_t out_size) {
     return 0;
 }
 
-// Инициализация системы утилит
 void utils_init() {
     builtin_count = 0;
-    current_directory[0] = '/';
-    current_directory[1] = 0;
+    g_cwd_fallback[0] = '/';
+    g_cwd_fallback[1] = 0;
     
-    // Регистрируем встроенные команды
     register_builtin("ls", cmd_ls, "List directory contents");
     register_builtin("find", cmd_find, "Search for files in directory tree");
 }
-

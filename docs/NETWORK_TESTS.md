@@ -1,4 +1,15 @@
-# Сетевые тесты MyOS
+# Сетевые тесты KnitOS
+
+## Стек (модернизация)
+
+- **netif / skb / RX queue** — softirq `net_process()`, poll fallback
+- **PIT 100Hz** — `timer_ms()` / jiffies для DHCP/DNS/TCP/ARP
+- **NIC IRQ** — RTL8139 + virtio; PIC unmask
+- **virtio-net** (legacy PCI) — основной NIC в `run-qemu*.bat`
+- **RTL8139 fallback** — `run-qemu-rtl8139.bat`
+- **ip_output + route table + IPv4 frag/reassembly**
+
+Проверка в госте: `network` (hw/stats), `route`, `dhcp`, `ping 10.0.2.2`.
 
 ## Полностью автоматический тест
 
@@ -7,19 +18,36 @@ build.bat
 tests\auto-test.bat
 ```
 
+По умолчанию QEMU поднимает **virtio-net** (legacy). Регрессия RTL8139:
+
+```bat
+tests\auto-test-rtl8139.bat
+rem или:
+tests\auto-test.bat --rtl8139
+```
+
 Работает через **WSL bash** (обходит блокировку PowerShell execution policy в корпоративной Windows).
 
 Опции:
 
 ```bat
 tests\auto-test.bat -SkipBuild
+set MYOS_NIC=virtio
+set MYOS_NIC=rtl8139
 ```
+
+После прогона скрипт проверяет serial-маркеры:
+- virtio: `[INF][virtio] initialized`
+- rtl8139: `[INF][rtl8139]`
+- DHCP/DNS/`ports_ok`/HTTP/`syn rx`
+- Host: `GET /api/ports` (httpd, dhcpd, LISTEN, :8080)
 
 WSL напрямую:
 
 ```bash
 cd "/mnt/c/Users/.../my os c++"
 bash tests/network/auto-network-test.sh
+MYOS_NIC=rtl8139 bash tests/network/auto-network-test.sh --rtl8139
 ```
 
 PowerShell-версия (если политика разрешает):
@@ -90,7 +118,7 @@ chmod +x tests/network/host-tests.sh
 
 | Файл | Назначение |
 |------|------------|
-| `tests/network/guest-commands.txt` | Команды для shell MyOS |
+| `tests/network/guest-commands.txt` | Команды для shell KnitOS |
 | `tests/network/host-tests.bat` | HTTP-тесты с Windows (curl) |
 | `tests/network/host-tests.sh` | HTTP-тесты из WSL/Linux |
 | `tests/network/tcp-echo-test.ps1` | TCP echo для `socktest` |
@@ -115,9 +143,9 @@ chmod +x tests/network/host-tests.sh
 
 | # | Host-команда | Ожидание |
 |---|--------------|----------|
-| 1 | `curl -v http://10.0.2.15:8080/` | `HTTP/1.1 200`, тело с `MyOS` |
+| 1 | `curl -v http://10.0.2.15:8080/` | `HTTP/1.1 200`, тело с `KnitOS` |
 | 2 | `curl http://10.0.2.15:8080/test.txt` | `hello-from-guest` |
-| 3 | `curl -I http://10.0.2.15:8080/` | `200`, `Content-Length`, `Server: MyOS-HTTP/1.1` |
+| 3 | `curl -I http://10.0.2.15:8080/` | `200`, `Content-Length`, `Server: KnitOS-HTTP/1.1` |
 | 4 | `curl -X OPTIONS -I http://10.0.2.15:8080/` | `204`, `Allow: GET, HEAD, OPTIONS` |
 | 5 | `curl -o /dev/null -w "%{http_code}" http://10.0.2.15:8080/nope` | `404` |
 | 6 | `curl --http1.1 http://10.0.2.15:8080/ http://10.0.2.15:8080/` | Оба запроса OK (Keep-Alive) |

@@ -1,4 +1,4 @@
-# Makefile для WSL/Linux
+# Makefile для WSL/Linux (синхронизирован с Makefile)
 # Использует обычный gcc вместо кросс-компилятора
 
 ASM = nasm
@@ -11,6 +11,8 @@ LDFLAGS = -m elf_i386 -T linker.ld -nostdlib
 
 BOOT_SRC = boot/boot.asm
 INTERRUPTS_SRC = boot/interrupts.asm
+SCHED_SWITCH_SRC = kernel/sched/switch.asm
+SCHED_TASK_SRC = kernel/sched/task.cpp
 KERNEL_SRC = kernel/kernel.cpp
 IDT_SRC = kernel/idt.cpp
 KEYBOARD_SRC = kernel/drivers/input/keyboard.cpp
@@ -22,26 +24,67 @@ PCI_SRC = kernel/drivers/pci/pci.cpp
 FS_SRC = kernel/fs.cpp
 UTILS_SRC = kernel/utils.cpp
 LS_SRC = kernel/utils/ls.cpp
+FIND_SRC = kernel/utils/find.cpp
+NANO_SRC = kernel/utils/nano.cpp
 DISK_MANAGER_SRC = kernel/drivers/storage/disk_manager.cpp
 MOUNT_SRC = kernel/mount.cpp
 DEV_SRC = kernel/dev.cpp
 DRIVER_MANAGER_SRC = kernel/driver_manager.cpp
 SYSCALL_SRC = kernel/syscall.cpp
 KERNEL_API_SRC = kernel/kernel_api.cpp
+PIC_SRC = kernel/drivers/pic/pic.cpp
+PIT_SRC = kernel/drivers/timer/pit.cpp
 NIC_SRC = kernel/drivers/network/nic.cpp
+SKB_SRC = kernel/drivers/network/core/skb.cpp
+NETIF_SRC = kernel/drivers/network/core/netif.cpp
+NET_QUEUE_SRC = kernel/drivers/network/core/net_queue.cpp
+NET_RX_SRC = kernel/drivers/network/core/net_rx.cpp
+NET_WAIT_SRC = kernel/drivers/network/core/net_wait.cpp
+NET_PORTS_SRC = kernel/drivers/network/core/net_ports.cpp
 RTL8139_SRC = kernel/drivers/network/drivers/rtl8139/rtl8139.cpp
 PCNET_SRC = kernel/drivers/network/drivers/pcnet/pcnet.cpp
+VIRTIO_NET_SRC = kernel/drivers/network/drivers/virtio_net/virtio_net.cpp
 ETHERNET_SRC = kernel/drivers/network/protocols/ethernet.cpp
 ARP_SRC = kernel/drivers/network/protocols/arp.cpp
 IP_SRC = kernel/drivers/network/protocols/ip.cpp
+ROUTE_SRC = kernel/drivers/network/protocols/route.cpp
 UDP_SRC = kernel/drivers/network/protocols/udp.cpp
 ICMP_SRC = kernel/drivers/network/protocols/icmp.cpp
 TCP_SRC = kernel/drivers/network/protocols/tcp.cpp
 TCP_CONNECTION_SRC = kernel/drivers/network/protocols/tcp_connection.cpp
 DNS_SRC = kernel/drivers/network/dns/dns.cpp
 DHCP_SRC = kernel/drivers/network/dhcp/dhcp.cpp
+NETWORK_CONFIG_SRC = kernel/drivers/network/network_config.cpp
+SOCKET_SRC = kernel/drivers/network/socket.cpp
+HTTP_SERVER_SRC = kernel/drivers/network/http_server.cpp
+HTTP_PROTOCOL_SRC = kernel/drivers/network/http_protocol.cpp
+HTTP_GZIP_SRC = kernel/drivers/network/http_gzip.cpp
 SERIAL_LOG_SRC = kernel/serial_log.cpp
-KERNEL_OBJ = boot/boot.o boot/interrupts.o kernel/kernel.o kernel/idt.o kernel/serial_log.o kernel/drivers/input/keyboard.o kernel/drivers/video/terminal.o kernel/drivers/storage/ata.o kernel/drivers/storage/ahci.o kernel/drivers/storage/nvme.o kernel/drivers/pci/pci.o kernel/fs.o kernel/utils.o kernel/utils/ls.o kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o kernel/syscall.o kernel/kernel_api.o kernel/drivers/network/nic.o kernel/drivers/network/drivers/rtl8139/rtl8139.o kernel/drivers/network/drivers/pcnet/pcnet.o kernel/drivers/network/protocols/ethernet.o kernel/drivers/network/protocols/arp.o kernel/drivers/network/protocols/ip.o kernel/drivers/network/protocols/udp.o kernel/drivers/network/protocols/icmp.o kernel/drivers/network/protocols/tcp.o kernel/drivers/network/protocols/tcp_connection.o kernel/drivers/network/dns/dns.o kernel/drivers/network/dhcp/dhcp.o
+HEAP_SRC = kernel/heap.cpp
+STRING_SRC = kernel/string.cpp
+KERNEL_OBJ = boot/boot.o boot/interrupts.o kernel/sched/switch.o kernel/sched/task.o \
+	kernel/kernel.o kernel/idt.o kernel/serial_log.o kernel/heap.o kernel/string.o \
+	kernel/mm/paging.o kernel/vga_autotest.o \
+	kernel/drivers/video/fb.o \
+	kernel/drivers/pic/pic.o kernel/drivers/timer/pit.o \
+	kernel/drivers/input/keyboard.o kernel/drivers/video/terminal.o \
+	kernel/drivers/storage/ata.o kernel/drivers/storage/ahci.o kernel/drivers/storage/nvme.o \
+	kernel/drivers/pci/pci.o kernel/fs.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
+	kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o \
+	kernel/syscall.o kernel/kernel_api.o \
+	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
+	kernel/drivers/network/core/skb.o kernel/drivers/network/core/netif.o \
+	kernel/drivers/network/core/net_queue.o kernel/drivers/network/core/net_rx.o \
+	kernel/drivers/network/core/net_wait.o kernel/drivers/network/core/net_ports.o \
+	kernel/drivers/network/http_protocol.o kernel/drivers/network/http_gzip.o kernel/drivers/network/http_server.o \
+	kernel/drivers/network/drivers/rtl8139/rtl8139.o kernel/drivers/network/drivers/pcnet/pcnet.o \
+	kernel/drivers/network/drivers/virtio_net/virtio_net.o \
+	kernel/drivers/network/protocols/ethernet.o kernel/drivers/network/protocols/arp.o \
+	kernel/drivers/network/protocols/ip.o kernel/drivers/network/protocols/route.o \
+	kernel/drivers/network/protocols/udp.o kernel/drivers/network/protocols/icmp.o \
+	kernel/drivers/network/protocols/tcp.o kernel/drivers/network/protocols/tcp_connection.o \
+	kernel/drivers/network/dns/dns.o kernel/drivers/network/dhcp/dhcp.o \
+	kernel/drivers/network/network_config.o
 KERNEL_BIN = iso/boot/kernel.bin
 ISO = myos.iso
 
@@ -59,6 +102,12 @@ boot/boot.o: $(BOOT_SRC)
 boot/interrupts.o: $(INTERRUPTS_SRC)
 	$(ASM) $(ASMFLAGS) -o boot/interrupts.o $(INTERRUPTS_SRC)
 
+kernel/sched/switch.o: $(SCHED_SWITCH_SRC)
+	$(ASM) $(ASMFLAGS) -o kernel/sched/switch.o $(SCHED_SWITCH_SRC)
+
+kernel/sched/task.o: $(SCHED_TASK_SRC) kernel/sched/task.h kernel/heap.h kernel/serial_log.h
+	$(CC) $(CFLAGS) -c -o kernel/sched/task.o $(SCHED_TASK_SRC)
+
 kernel/kernel.o: $(KERNEL_SRC) kernel/kernel.h
 	$(CC) $(CFLAGS) -c -o kernel/kernel.o $(KERNEL_SRC)
 
@@ -68,11 +117,32 @@ kernel/idt.o: $(IDT_SRC) kernel/idt.h
 kernel/serial_log.o: $(SERIAL_LOG_SRC) kernel/serial_log.h
 	$(CC) $(CFLAGS) -c -o kernel/serial_log.o $(SERIAL_LOG_SRC)
 
-kernel/drivers/input/keyboard.o: $(KEYBOARD_SRC) kernel/drivers/input/keyboard.h kernel/kernel.h
+kernel/heap.o: $(HEAP_SRC) kernel/heap.h
+	$(CC) $(CFLAGS) -c -o kernel/heap.o $(HEAP_SRC)
+
+kernel/mm/paging.o: kernel/mm/paging.cpp kernel/mm/paging.h kernel/idt.h kernel/serial_log.h
+	$(CC) $(CFLAGS) -c -o kernel/mm/paging.o kernel/mm/paging.cpp
+
+kernel/string.o: $(STRING_SRC)
+	$(CC) $(CFLAGS) -c -o kernel/string.o $(STRING_SRC)
+
+kernel/drivers/pic/pic.o: $(PIC_SRC) kernel/drivers/pic/pic.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/pic/pic.o $(PIC_SRC)
+
+kernel/drivers/timer/pit.o: $(PIT_SRC) kernel/drivers/timer/pit.h kernel/drivers/pic/pic.h kernel/sched/task.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/timer/pit.o $(PIT_SRC)
+
+kernel/drivers/input/keyboard.o: $(KEYBOARD_SRC) kernel/drivers/input/keyboard.h kernel/kernel.h kernel/drivers/pic/pic.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/input/keyboard.o $(KEYBOARD_SRC)
 
-kernel/drivers/video/terminal.o: $(TERMINAL_SRC) kernel/drivers/video/terminal.h kernel/kernel.h
+kernel/drivers/video/terminal.o: $(TERMINAL_SRC) kernel/drivers/video/terminal.h kernel/drivers/video/fb.h kernel/kernel.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/video/terminal.o $(TERMINAL_SRC)
+
+kernel/drivers/video/fb.o: kernel/drivers/video/fb.cpp kernel/drivers/video/fb.h kernel/mm/paging.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/video/fb.o kernel/drivers/video/fb.cpp
+
+kernel/vga_autotest.o: kernel/vga_autotest.cpp kernel/vga_autotest.h kernel/drivers/video/terminal.h
+	$(CC) $(CFLAGS) -c -o kernel/vga_autotest.o kernel/vga_autotest.cpp
 
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)
@@ -95,6 +165,12 @@ kernel/utils.o: $(UTILS_SRC) kernel/utils.h
 kernel/utils/ls.o: $(LS_SRC) kernel/utils.h kernel/fs.h kernel/drivers/video/terminal.h kernel/kernel.h
 	$(CC) $(CFLAGS) -c -o kernel/utils/ls.o $(LS_SRC)
 
+kernel/utils/find.o: $(FIND_SRC) kernel/utils.h kernel/fs.h kernel/drivers/video/terminal.h kernel/kernel.h
+	$(CC) $(CFLAGS) -c -o kernel/utils/find.o $(FIND_SRC)
+
+kernel/utils/nano.o: $(NANO_SRC) kernel/utils/nano.h kernel/fs.h kernel/drivers/video/terminal.h kernel/drivers/input/keyboard.h kernel/kernel.h
+	$(CC) $(CFLAGS) -c -o kernel/utils/nano.o $(NANO_SRC)
+
 kernel/drivers/storage/disk_manager.o: $(DISK_MANAGER_SRC) kernel/drivers/storage/disk_manager.h kernel/drivers/storage/ata.h kernel/drivers/storage/ahci.h kernel/drivers/storage/nvme.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/disk_manager.o $(DISK_MANAGER_SRC)
 
@@ -113,14 +189,35 @@ kernel/syscall.o: $(SYSCALL_SRC) kernel/syscall.h kernel/driver_manager.h kernel
 kernel/kernel_api.o: $(KERNEL_API_SRC) kernel/kernel_api.h kernel/driver_manager.h
 	$(CC) $(CFLAGS) -c -o kernel/kernel_api.o $(KERNEL_API_SRC)
 
-kernel/drivers/network/nic.o: $(NIC_SRC) kernel/drivers/network/nic.h kernel/drivers/pci/pci.h kernel/driver_manager.h kernel/drivers/network/drivers/rtl8139/rtl8139.h kernel/drivers/network/drivers/pcnet/pcnet.h
+kernel/drivers/network/nic.o: $(NIC_SRC) kernel/drivers/network/nic.h kernel/drivers/pci/pci.h kernel/driver_manager.h kernel/drivers/network/drivers/rtl8139/rtl8139.h kernel/drivers/network/drivers/pcnet/pcnet.h kernel/drivers/network/drivers/virtio_net/virtio_net.h kernel/drivers/network/core/netif.h kernel/drivers/network/core/net_rx.h kernel/sched/task.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/nic.o $(NIC_SRC)
 
-kernel/drivers/network/drivers/rtl8139/rtl8139.o: $(RTL8139_SRC) kernel/drivers/network/drivers/rtl8139/rtl8139.h kernel/drivers/network/nic.h kernel/drivers/pci/pci.h
+kernel/drivers/network/core/skb.o: $(SKB_SRC) kernel/drivers/network/core/skb.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/core/skb.o $(SKB_SRC)
+
+kernel/drivers/network/core/net_queue.o: $(NET_QUEUE_SRC) kernel/drivers/network/core/net_queue.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/core/net_queue.o $(NET_QUEUE_SRC)
+
+kernel/drivers/network/core/netif.o: $(NETIF_SRC) kernel/drivers/network/core/netif.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/core/netif.o $(NETIF_SRC)
+
+kernel/drivers/network/core/net_rx.o: $(NET_RX_SRC) kernel/drivers/network/core/net_rx.h kernel/drivers/network/core/netif.h kernel/drivers/network/protocols/ip.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/core/net_rx.o $(NET_RX_SRC)
+
+kernel/drivers/network/core/net_wait.o: $(NET_WAIT_SRC) kernel/drivers/network/core/net_wait.h kernel/drivers/timer/pit.h kernel/sched/task.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/core/net_wait.o $(NET_WAIT_SRC)
+
+kernel/drivers/network/core/net_ports.o: $(NET_PORTS_SRC) kernel/drivers/network/core/net_ports.h kernel/drivers/network/socket.h kernel/drivers/network/protocols/tcp_connection.h kernel/drivers/network/protocols/udp.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/core/net_ports.o $(NET_PORTS_SRC)
+
+kernel/drivers/network/drivers/rtl8139/rtl8139.o: $(RTL8139_SRC) kernel/drivers/network/drivers/rtl8139/rtl8139.h kernel/drivers/network/nic.h kernel/drivers/pci/pci.h kernel/drivers/pic/pic.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/drivers/rtl8139/rtl8139.o $(RTL8139_SRC)
 
 kernel/drivers/network/drivers/pcnet/pcnet.o: $(PCNET_SRC) kernel/drivers/network/drivers/pcnet/pcnet.h kernel/drivers/network/nic.h kernel/drivers/pci/pci.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/drivers/pcnet/pcnet.o $(PCNET_SRC)
+
+kernel/drivers/network/drivers/virtio_net/virtio_net.o: $(VIRTIO_NET_SRC) kernel/drivers/network/drivers/virtio_net/virtio_net.h kernel/drivers/network/nic.h kernel/drivers/pci/pci.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/drivers/virtio_net/virtio_net.o $(VIRTIO_NET_SRC)
 
 kernel/drivers/network/protocols/ethernet.o: $(ETHERNET_SRC) kernel/drivers/network/protocols/ethernet.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/protocols/ethernet.o $(ETHERNET_SRC)
@@ -128,10 +225,13 @@ kernel/drivers/network/protocols/ethernet.o: $(ETHERNET_SRC) kernel/drivers/netw
 kernel/drivers/network/protocols/arp.o: $(ARP_SRC) kernel/drivers/network/protocols/arp.h kernel/drivers/network/protocols/ethernet.h kernel/drivers/network/nic.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/protocols/arp.o $(ARP_SRC)
 
-kernel/drivers/network/protocols/ip.o: $(IP_SRC) kernel/drivers/network/protocols/ip.h kernel/drivers/network/protocols/arp.h kernel/drivers/network/dhcp/dhcp.h
+kernel/drivers/network/protocols/ip.o: $(IP_SRC) kernel/drivers/network/protocols/ip.h kernel/drivers/network/protocols/arp.h kernel/drivers/network/protocols/route.h kernel/drivers/network/dhcp/dhcp.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/protocols/ip.o $(IP_SRC)
 
-kernel/drivers/network/protocols/udp.o: $(UDP_SRC) kernel/drivers/network/protocols/udp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/protocols/ethernet.h kernel/drivers/network/protocols/arp.h kernel/drivers/network/nic.h
+kernel/drivers/network/protocols/route.o: $(ROUTE_SRC) kernel/drivers/network/protocols/route.h kernel/drivers/network/core/netif.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/protocols/route.o $(ROUTE_SRC)
+
+kernel/drivers/network/protocols/udp.o: $(UDP_SRC) kernel/drivers/network/protocols/udp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/protocols/ethernet.h kernel/drivers/network/protocols/arp.h kernel/drivers/network/nic.h kernel/drivers/network/socket.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/protocols/udp.o $(UDP_SRC)
 
 kernel/drivers/network/protocols/icmp.o: $(ICMP_SRC) kernel/drivers/network/protocols/icmp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/protocols/ethernet.h kernel/drivers/network/protocols/arp.h kernel/drivers/network/protocols/tcp_connection.h kernel/drivers/network/nic.h
@@ -143,11 +243,26 @@ kernel/drivers/network/protocols/tcp.o: $(TCP_SRC) kernel/drivers/network/protoc
 kernel/drivers/network/protocols/tcp_connection.o: $(TCP_CONNECTION_SRC) kernel/drivers/network/protocols/tcp_connection.h kernel/drivers/network/protocols/tcp.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/protocols/tcp_connection.o $(TCP_CONNECTION_SRC)
 
-kernel/drivers/network/dns/dns.o: $(DNS_SRC) kernel/drivers/network/dns/dns.h kernel/drivers/network/protocols/udp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/protocols/tcp_connection.h
+kernel/drivers/network/dns/dns.o: $(DNS_SRC) kernel/drivers/network/dns/dns.h kernel/drivers/network/protocols/udp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/protocols/tcp_connection.h kernel/serial_log.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/dns/dns.o $(DNS_SRC)
 
-kernel/drivers/network/dhcp/dhcp.o: $(DHCP_SRC) kernel/drivers/network/dhcp/dhcp.h kernel/drivers/network/protocols/udp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/nic.h kernel/drivers/network/protocols/ethernet.h kernel/drivers/network/protocols/arp.h kernel/drivers/network/dns/dns.h
+kernel/drivers/network/dhcp/dhcp.o: $(DHCP_SRC) kernel/drivers/network/dhcp/dhcp.h kernel/drivers/network/protocols/udp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/nic.h kernel/drivers/network/protocols/ethernet.h kernel/drivers/network/protocols/arp.h kernel/drivers/network/dns/dns.h kernel/drivers/network/network_config.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/dhcp/dhcp.o $(DHCP_SRC)
+
+kernel/drivers/network/network_config.o: $(NETWORK_CONFIG_SRC) kernel/drivers/network/network_config.h kernel/drivers/network/dhcp/dhcp.h kernel/drivers/network/protocols/ip.h kernel/drivers/network/dns/dns.h kernel/fs.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/network_config.o $(NETWORK_CONFIG_SRC)
+
+kernel/drivers/network/socket.o: $(SOCKET_SRC) kernel/drivers/network/socket.h kernel/drivers/network/core/net_ports.h kernel/drivers/network/protocols/tcp.h kernel/drivers/network/protocols/udp.h kernel/drivers/network/nic.h kernel/sched/task.h kernel/drivers/timer/pit.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/socket.o $(SOCKET_SRC)
+
+kernel/drivers/network/http_server.o: $(HTTP_SERVER_SRC) kernel/drivers/network/http_server.h kernel/drivers/network/http_protocol.h kernel/drivers/network/socket.h kernel/fs.h kernel/serial_log.h kernel/drivers/timer/pit.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_server.o $(HTTP_SERVER_SRC)
+
+kernel/drivers/network/http_protocol.o: $(HTTP_PROTOCOL_SRC) kernel/drivers/network/http_protocol.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_protocol.o $(HTTP_PROTOCOL_SRC)
+
+kernel/drivers/network/http_gzip.o: $(HTTP_GZIP_SRC) kernel/drivers/network/http_gzip.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_gzip.o $(HTTP_GZIP_SRC)
 
 clean:
 	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO)

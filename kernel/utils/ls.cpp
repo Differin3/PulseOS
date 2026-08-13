@@ -104,9 +104,13 @@ int cmd_ls(int argc, const char** argv) {
 
     char buffer[2048];
     if (fs_list_dir(list_path, buffer, sizeof(buffer)) < 0) {
-        terminal_writestring("\nls: cannot access '");
-        terminal_writestring(target_path ? target_path : list_path);
-        terminal_writestring("': No such file or directory\n");
+        if (!fs_ready()) {
+            terminal_writestring("\nls: filesystem not initialized\n");
+        } else {
+            terminal_writestring("\nls: cannot access '");
+            terminal_writestring(target_path ? target_path : list_path);
+            terminal_writestring("': No such file or directory\n");
+        }
         return -1;
     }
 

@@ -31,7 +31,7 @@ curl_diag() {
 command -v curl >/dev/null || { echo "[FAIL] curl required"; exit 1; }
 
 echo "============================================"
-echo " MyOS network host tests"
+echo " KnitOS network host tests"
 echo " Target: ${BASE}"
 echo " Time:   $(date '+%Y-%m-%d %H:%M:%S')"
 echo " Verbose: ${VERBOSE}"
@@ -63,12 +63,12 @@ else
   fi
 fi
 
-echo "[--] GET / (expect 200 + MyOS + text/html) ..."
+echo "[--] GET / (expect 200 + KnitOS + text/html) ..."
 code=$(curl -s -o /tmp/myos_index.html -w "%{http_code}" --max-time 8 "${BASE}/" || true)
 stat=$(curl_stat "${BASE}/")
 size=$(wc -c < /tmp/myos_index.html 2>/dev/null | tr -d ' ' || echo 0)
 ctype=$(curl -sI --max-time 5 "${BASE}/" | grep -i '^Content-Type:' | tr -d '\r' || true)
-if [[ "$code" == "200" ]] && grep -qi MyOS /tmp/myos_index.html; then
+if [[ "$code" == "200" ]] && grep -qi KnitOS /tmp/myos_index.html; then
   pass "GET / -> ${code} (${size} bytes) [${stat}]"
   if echo "$ctype" | grep -qi 'text/html'; then
     pass "Content-Type text/html"
@@ -166,10 +166,10 @@ fi
 
 echo "[--] gzip Accept-Encoding ..."
 if curl -sf -H "Accept-Encoding: gzip" --compressed --max-time 10 "${BASE}/" -o /tmp/myos_gz.html 2>/dev/null; then
-  if grep -qi MyOS /tmp/myos_gz.html; then
-    pass "gzip response decompresses to MyOS HTML"
+  if grep -qi KnitOS /tmp/myos_gz.html; then
+    pass "gzip response decompresses to KnitOS HTML"
   else
-    fail "gzip body missing MyOS"
+    fail "gzip body missing KnitOS"
   fi
 else
   hdr=$(curl -sI -H "Accept-Encoding: gzip" --max-time 8 "${BASE}/" || true)
@@ -178,6 +178,29 @@ else
   else
     fail "gzip not supported or transfer failed"
   fi
+fi
+
+echo "[--] GET /api/ports (port table / owner) ..."
+ports_tbl=$(curl -s --max-time 8 "${BASE}/api/ports" || true)
+if echo "$ports_tbl" | grep -q "httpd"; then
+  pass "/api/ports lists httpd"
+else
+  fail "/api/ports missing httpd — got: $(echo "$ports_tbl" | head -c 200)"
+fi
+if echo "$ports_tbl" | grep -q ":${HTTP_PORT}"; then
+  pass "/api/ports shows listen port ${HTTP_PORT}"
+else
+  fail "/api/ports missing :${HTTP_PORT}"
+fi
+if echo "$ports_tbl" | grep -q "LISTEN"; then
+  pass "/api/ports has LISTEN state"
+else
+  fail "/api/ports missing LISTEN"
+fi
+if echo "$ports_tbl" | grep -q "dhcpd"; then
+  pass "/api/ports lists dhcpd"
+else
+  fail "/api/ports missing dhcpd"
 fi
 
 echo "[--] GET /api/access-log (request logging) ..."
@@ -195,8 +218,8 @@ fi
 
 echo "[--] Server + Connection headers ..."
 hdr=$(curl -sI --max-time 8 "${BASE}/" || true)
-if echo "$hdr" | grep -qi "Server: MyOS-HTTP/1.1"; then
-  pass "Server: MyOS-HTTP/1.1"
+if echo "$hdr" | grep -qi "Server: KnitOS-HTTP/1.1"; then
+  pass "Server: KnitOS-HTTP/1.1"
 else
   fail "Server header missing"
 fi

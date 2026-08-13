@@ -225,7 +225,8 @@ int dns_query(uint32_t dns_server, const char* hostname, uint32_t* ip_address) {
             udp_send(dns_server, DNS_CLIENT_PORT, DNS_PORT, dns_buffer, pos);
         }
 
-        for (volatile int i = 0; i < 100000; i++);
+        extern void net_wait_ms(uint32_t ms);
+        net_wait_ms(10);
         attempts++;
     }
 

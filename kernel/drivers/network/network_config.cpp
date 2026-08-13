@@ -293,7 +293,7 @@ static int netcfg_write_interfaces(void) {
     }
     netcfg_append_ip_line(buf, &pos, (int)sizeof(buf), "dns-nameservers ", dns);
     netcfg_append(buf, &pos, (int)sizeof(buf), "    mtu 1500\n");
-    netcfg_append(buf, &pos, (int)sizeof(buf), "    hostname myos\n");
+    netcfg_append(buf, &pos, (int)sizeof(buf), "    hostname knitos\n");
     if (from_dhcp && lease > 0) {
         char ipstr[20];
         netcfg_append(buf, &pos, (int)sizeof(buf), "\n# DHCP metadata\n");
@@ -348,22 +348,28 @@ int network_config_apply_boot(void) {
         log_ip(LOG_INFO, "netcfg", "loaded from disk ip", ip_get_our_ip());
         log_fmt3(LOG_INFO, "netcfg", "runtime", "gw", ip_get_gateway(),
                  "dns", dns_get_server(), "mask", ip_get_subnet_mask());
-        netcfg_write_resolv(dns_get_server());
+        /* Без disk write на boot: IRQ ещё off, AHCI write через WSL вешает boot. */
+        log_msg(LOG_INFO, "netcfg", "static boot ok");
         return 0;
     }
     log_msg(LOG_DBG, "netcfg", "no config, DHCP default");
     int rc = netcfg_apply_dhcp();
     if (rc == 0) {
-        netcfg_write_resolv(dns_get_server());
+        /* Не писать resolv/interfaces здесь — только runtime IP. */
+        log_msg(LOG_INFO, "netcfg", "DHCP boot ok");
     }
     return rc;
 }
 
 int network_config_save(void) {
+    log_msg(LOG_DBG, "netcfg", "save begin");
     fs_create_dir("/etc");
     fs_create_dir("/etc/network");
 
-    if (netcfg_write_interfaces() != 0) return -1;
+    if (netcfg_write_interfaces() != 0) {
+        log_msg(LOG_ERR, "netcfg", "interfaces write failed");
+        return -1;
+    }
 
     uint32_t dns = dns_get_server();
     if (dns == 0) dns = 0x0A000203;

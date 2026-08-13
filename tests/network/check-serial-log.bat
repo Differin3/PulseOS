@@ -18,6 +18,9 @@ echo  Serial log checks: %LOG%
 echo ============================================
 echo.
 
+call :find_optional "fs_ok" "fs_ok" "filesystem autotest"
+call :find_optional "virtio" "[INF][virtio] initialized" "virtio-net driver init"
+call :find_optional "rtl8139" "[INF][rtl8139]" "RTL8139 driver activity"
 call :find_pattern "dhcp" "[INF][dhcp]" "DHCP activity"
 call :find_pattern "nic" "[INF][nic]" "NIC init/packets"
 call :find_pattern "http_listen" "[INF][http] listen" "HTTP server started"
@@ -27,6 +30,7 @@ call :find_optional "dns" "[INF][dns]" "DNS resolve"
 call :find_optional "autotest" "[INF][autotest] http_done" "Autotest HTTP done"
 call :find_optional "idle" "[INF][http] idle_done" "HTTP idle shutdown"
 call :find_optional "syn" "syn rx" "TCP SYN received"
+call :find_optional "pit" "PIT timer" "PIT timer boot line"
 call :find_optional "err" "[ERR]" "Errors in log"
 
 echo.

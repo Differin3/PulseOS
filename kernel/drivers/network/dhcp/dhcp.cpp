@@ -5,9 +5,11 @@
 #include "../protocols/ethernet.h"
 #include "../protocols/arp.h"
 #include "../dns/dns.h"
-#include "../network_config.h"
 #include "../protocols/tcp_connection.h"
+#include "../core/net_ports.h"
+#include "drivers/timer/pit.h"
 #include "serial_log.h"
+#include "sched/task.h"
 
 // Объявления функций из протоколов
 extern void ip_set_our_ip(uint32_t ip);
@@ -47,6 +49,7 @@ static uint32_t dhcp_bound_at = 0;
 static bool dhcp_renew_in_progress = false;
 static uint32_t dhcp_renew_sent_at = 0;
 static bool dhcp_verbose = false;
+static volatile int g_dhcpd_pid = -1;
 
 static void dhcp_print(const char* msg) {
     if (dhcp_verbose) {
@@ -433,7 +436,8 @@ static int dhcp_handle_ack(const struct dhcp_header* header, const uint8_t* opti
     } else {
         log_ip(LOG_INFO, "dhcp", "ACK applied", ip_address);
         log_fmt3(LOG_INFO, "dhcp", "lease", "sec", lease_time, "gw", gateway, "mask", subnet_mask);
-        network_config_save();
+        /* Не пишем /etc на каждый ACK: на boot IRQ ещё off, AHCI write
+           через WSL медленный; save — через network_config_save / shell. */
         dhcp_print("\n[DHCP] ACK received, configuration applied");
     }
     return 0;
@@ -446,6 +450,11 @@ void dhcp_init() {
     dhcp_xid = 0;
     dhcp_server_ip = 0;
     dhcp_offered_ip = 0;
+    int pid = g_dhcpd_pid >= 0 ? g_dhcpd_pid : sched_current_id();
+    if (pid < 0) pid = NET_PID_DHCPD;
+    net_ports_register(NET_PROTO_UDP, NETPORT_LISTEN,
+                       0, DHCP_CLIENT_PORT, 0, 0,
+                       -1, pid, "dhcpd");
 }
 
 // Обработать входящий DHCP пакет
@@ -531,10 +540,14 @@ static int dhcp_do_acquire(void) {
         }
 
         nic_process_packets();
-        
-        // Небольшая задержка
-        for (volatile int i = 0; i < 100000; i++);
-        
+        if (dhcp_current_state == DHCP_STATE_BOUND) {
+            break;
+        }
+        extern void net_wait_ms(uint32_t ms);
+        net_wait_ms(10);
+        if (dhcp_current_state == DHCP_STATE_BOUND) {
+            break;
+        }
         attempts++;
         if (attempts >= max_attempts) {
             // Повторяем DISCOVER
@@ -637,9 +650,10 @@ void dhcp_poll() {
     }
 
     uint32_t now = tcp_get_time();
-    uint32_t half_lease_ticks = (dhcp_config.lease_time / 2) * 10;
-    if (half_lease_ticks < 300) {
-        half_lease_ticks = 300;
+    // lease_time is seconds; renew at half-lease (milliseconds)
+    uint32_t half_lease_ticks = (dhcp_config.lease_time / 2) * 1000;
+    if (half_lease_ticks < 30000) {
+        half_lease_ticks = 30000;
     }
 
     if (dhcp_renew_in_progress) {
@@ -663,4 +677,35 @@ void dhcp_poll() {
     if (dhcp_send_request(dhcp_config.ip_address, dhcp_config.server_ip) != 0) {
         dhcp_renew_in_progress = false;
     }
+}
+
+static void dhcpd_task(void* arg) {
+    (void)arg;
+    g_dhcpd_pid = sched_current_id();
+    net_ports_register(NET_PROTO_UDP, NETPORT_LISTEN,
+                       0, DHCP_CLIENT_PORT, 0, 0,
+                       -1, g_dhcpd_pid, "dhcpd");
+    log_fmt3(LOG_INFO, "autotest", "dhcpd_kthread_ok", "pid", (uint32_t)g_dhcpd_pid,
+             "ok", 1u, "x", 0u);
+    while (1) {
+        dhcp_poll();
+        task_sleep_ms(50);
+    }
+}
+
+int dhcp_service_pid(void) {
+    return g_dhcpd_pid;
+}
+
+int dhcp_start_service(void) {
+    if (g_dhcpd_pid >= 0 && task_get_state(g_dhcpd_pid) != TASK_UNUSED &&
+        task_get_state(g_dhcpd_pid) != TASK_ZOMBIE) {
+        return g_dhcpd_pid;
+    }
+    g_dhcpd_pid = -1;
+    int id = task_create(dhcpd_task, 0, "dhcpd");
+    if (id < 0) return -1;
+    /* Yield until dhcpd sets pid / logs */
+    for (int i = 0; i < 64 && g_dhcpd_pid < 0; i++) sched_yield();
+    return id;
 }

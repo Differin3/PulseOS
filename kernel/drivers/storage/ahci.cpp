@@ -1,6 +1,7 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/pci/pci.h"
 #include "drivers/video/terminal.h"
+#include "drivers/timer/pit.h"
 #include "driver_manager.h"
 #include "serial_log.h"
 #include <stdint.h>
@@ -64,7 +65,8 @@ static struct ahci_port_state* ahci_current_port = 0;
 // CL 1KB + FIS 1KB + 32 cmd tables @ 256 B each (xv64 layout)
 #define AHCI_CMD_TABLE_STRIDE 256
 #define AHCI_PORT_MEM_SIZE (2048 + AHCI_CMD_SLOTS * AHCI_CMD_TABLE_STRIDE)
-static uint8_t ahci_port_mem[AHCI_MAX_PORTS][AHCI_PORT_MEM_SIZE] __attribute__((aligned(256)));
+/* CL base must be 1KiB-aligned (AHCI); 256 was insufficient for writes on QEMU. */
+static uint8_t ahci_port_mem[AHCI_MAX_PORTS][AHCI_PORT_MEM_SIZE] __attribute__((aligned(1024)));
 
 static inline void ahci_mmio_write32(volatile uint32_t* base, uint32_t offset, uint32_t val) {
     volatile uint32_t* addr = (volatile uint32_t*)((uintptr_t)base + offset);
@@ -200,7 +202,13 @@ static void ahci_port_spinup(volatile uint32_t* hba, struct ahci_port_state* por
 static int ahci_start_port(struct ahci_port_state* port) {
     if (!port || !port->mmio) return -1;
 
-    while (ahci_mmio_read32(port->mmio, AHCI_PORT_CMD) & AHCI_PORT_CMD_CR) {}
+    for (int i = 0; i < AHCI_IO_MAX_WAIT; i++) {
+        if (!(ahci_mmio_read32(port->mmio, AHCI_PORT_CMD) & AHCI_PORT_CMD_CR)) break;
+        if (i + 1 >= AHCI_IO_MAX_WAIT) {
+            log_msg(LOG_ERR, "ahci", "port start CR timeout");
+            return -1;
+        }
+    }
 
     uint32_t cmd = ahci_mmio_read32(port->mmio, AHCI_PORT_CMD);
     cmd |= AHCI_PORT_CMD_FRE;
@@ -243,19 +251,35 @@ static void ahci_log_port_diag(const char* tag, volatile uint32_t* port_mmio, ui
     log_fmt3(level, "ahci", tag, "tfd", tfd, "serr", serr, "det", (uint32_t)(ssts & 0x0F));
 }
 
+static int ahci_cmd_finished_ok(struct ahci_port_state* port, int slot) {
+    if (ahci_mmio_read32(port->mmio, AHCI_PORT_CI) & (1u << slot)) return 0;
+    uint32_t is = ahci_mmio_read32(port->mmio, AHCI_PORT_IS);
+    if (is & (AHCI_PxIS_TFES | AHCI_PxIS_HBFS | AHCI_PxIS_HBDS)) {
+        log_fmt3(LOG_ERR, "ahci", "cmd err", "port", port->port_num, "is", is, "slot", (uint32_t)slot);
+        ahci_log_port_diag("cmd err", port->mmio, port->port_num, LOG_ERR);
+        return -1;
+    }
+    ahci_mmio_write32(port->mmio, AHCI_PORT_IS, is);
+    return 1;
+}
+
 static int ahci_wait_cmd(struct ahci_port_state* port, int slot) {
     if (!port || !port->mmio || slot < 0) return -1;
-    for (int i = 0; i < AHCI_IO_MAX_WAIT; i++) {
-        if (!(ahci_mmio_read32(port->mmio, AHCI_PORT_CI) & (1u << slot))) {
-            uint32_t is = ahci_mmio_read32(port->mmio, AHCI_PORT_IS);
-            if (is & (AHCI_PxIS_TFES | AHCI_PxIS_HBFS | AHCI_PxIS_HBDS)) {
-                log_fmt3(LOG_ERR, "ahci", "cmd err", "port", port->port_num, "is", is, "slot", (uint32_t)slot);
-                ahci_log_port_diag("cmd err", port->mmio, port->port_num, LOG_ERR);
-                return -1;
-            }
-            ahci_mmio_write32(port->mmio, AHCI_PORT_IS, is);
-            return 0;
+
+    /* После sti jiffies тикают — ждём до ~5s (WSL write на /mnt/c медленный). */
+    if (timer_jiffies() != 0) {
+        uint32_t start = timer_ms();
+        while (timer_ms_since(start) < 5000u) {
+            int done = ahci_cmd_finished_ok(port, slot);
+            if (done != 0) return done < 0 ? -1 : 0;
         }
+        log_msg(LOG_ERR, "ahci", "command timeout");
+        return -1;
+    }
+
+    for (int i = 0; i < AHCI_IO_MAX_WAIT; i++) {
+        int done = ahci_cmd_finished_ok(port, slot);
+        if (done != 0) return done < 0 ? -1 : 0;
     }
     log_msg(LOG_ERR, "ahci", "command timeout");
     return -1;
@@ -300,6 +324,14 @@ static void ahci_setup_prdt(struct ahci_cmd_table* tbl, void* buffer, uint32_t b
 static int ahci_sata_transfer(struct ahci_port_state* port, uint32_t lba, uint16_t count,
                                 void* buffer, bool write) {
     if (!port || !port->active || !buffer || count == 0) return -1;
+    /* Один сектор через выровненный bounce — DMA надёжнее на QEMU/WSL. */
+    if (count != 1) return -1;
+
+    static uint8_t dma_buf[512] __attribute__((aligned(16)));
+    uint8_t* host = (uint8_t*)buffer;
+    if (write) {
+        for (int i = 0; i < 512; i++) dma_buf[i] = host[i];
+    }
 
     int slot = ahci_find_cmdslot(port);
     if (slot < 0) {
@@ -313,18 +345,25 @@ static int ahci_sata_transfer(struct ahci_port_state* port, uint32_t lba, uint16
     ahci_zero_cmd_table(tbl);
     uint8_t cmd = write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT;
     ahci_build_fis_dma_ext(tbl->cfis, cmd, lba, count);
-    ahci_setup_prdt(tbl, buffer, (uint32_t)count * 512u);
+    ahci_setup_prdt(tbl, dma_buf, 512u);
 
+    hdr->cmd_table_base = (uint32_t)(uintptr_t)tbl;
+    hdr->cmd_table_base_upper = 0;
     hdr->prdt_length = 1;
-    hdr->flags = (uint16_t)((1u << 8) | 5u);
-    if (write) hdr->flags |= (1u << 6);
+    /* CFL=5; W=bit6. НЕ ставить bit8 — это BIST, ломает WRITE на QEMU. */
+    hdr->flags = (uint16_t)(5u | (write ? (1u << 6) : 0u));
 
     ahci_mmio_write32(port->mmio, AHCI_PORT_IS, 0xFFFFFFFF);
 
     if (ahci_wait_tfd(port) != 0) return -1;
 
+    __asm__ volatile("" ::: "memory");
     ahci_mmio_write32(port->mmio, AHCI_PORT_CI, 1u << slot);
-    return ahci_wait_cmd(port, slot);
+    int rc = ahci_wait_cmd(port, slot);
+    if (rc == 0 && !write) {
+        for (int i = 0; i < 512; i++) host[i] = dma_buf[i];
+    }
+    return rc;
 }
 
 static uint32_t ahci_parse_identify(uint16_t* identify) {
@@ -354,8 +393,10 @@ static int ahci_port_identify(struct ahci_port_state* port) {
     ahci_zero_cmd_table(tbl);
     ahci_build_fis_identify(tbl->cfis);
     ahci_setup_prdt(tbl, identify_buf, 512);
+    hdr->cmd_table_base = (uint32_t)(uintptr_t)tbl;
+    hdr->cmd_table_base_upper = 0;
     hdr->prdt_length = 1;
-    hdr->flags = (uint16_t)((1u << 8) | 5u);
+    hdr->flags = 5u;
 
     ahci_mmio_write32(port->mmio, AHCI_PORT_IS, 0xFFFFFFFF);
     if (ahci_wait_tfd(port) != 0) return -1;

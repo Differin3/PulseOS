@@ -3,6 +3,8 @@
 #include "../nic.h"
 #include "serial_log.h"
 #include "tcp_connection.h"
+#include "../core/net_wait.h"
+#include "drivers/timer/pit.h"
 #include <stddef.h>
 
 static inline uint16_t htons(uint16_t v) {
@@ -161,18 +163,17 @@ int arp_resolve(uint32_t ip_address, uint8_t* mac_address, int timeout_ms) {
         return -1;
     }
 
-    int attempts = timeout_ms > 0 ? timeout_ms / 100 : 30;
-    if (attempts < 1) attempts = 1;
-
-    for (int i = 0; i < attempts; i++) {
+    uint32_t start = timer_ms();
+    int retry = 0;
+    while (timer_ms_since(start) < (uint32_t)(timeout_ms > 0 ? timeout_ms : 3000)) {
         nic_process_packets();
         if (arp_get_mac(ip_address, mac_address)) {
             return 0;
         }
-        if (i > 0 && (i % 10) == 0) {
+        if ((retry++ % 10) == 9) {
             arp_send_request(ip_address);
         }
-        for (volatile int j = 0; j < 100000; j++);
+        net_wait_ms(10);
     }
 
     return -1;

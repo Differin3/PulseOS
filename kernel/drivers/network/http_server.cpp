@@ -2,10 +2,16 @@
 #include "http_protocol.h"
 #include "http_gzip.h"
 #include "socket.h"
+#include "core/net_ports.h"
 #include "protocols/ip.h"
+#include "protocols/tcp.h"
+#include "protocols/tcp_connection.h"
+#include "nic.h"
 #include "../../fs.h"
 #include "serial_log.h"
 #include "drivers/video/terminal.h"
+#include "drivers/timer/pit.h"
+#include "sched/task.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -388,6 +394,15 @@ static bool http_handle_request(int cfd, const char* req, size_t req_len,
         return info.keep_alive;
     }
 
+    if (http_path_eq(info.path, "/api/ports") && info.method == HTTP_METHOD_GET) {
+        static char ports_body[4096];
+        size_t plen = net_ports_format_table(ports_body, sizeof(ports_body));
+        http_send_response(cfd, 200, "text/plain; charset=utf-8", ports_body, plen,
+                           info.is_http11, info.keep_alive, true, 0);
+        http_log_access(info.method, info.path, 200, client_ip);
+        return info.keep_alive;
+    }
+
     if (info.method == HTTP_METHOD_PUT) {
         char fs_path[HTTP_PATH_MAX + 16];
         http_build_fs_path(info.path, fs_path, sizeof(fs_path));
@@ -474,19 +489,97 @@ static bool http_handle_request(int cfd, const char* req, size_t req_len,
     return info.keep_alive;
 }
 
+struct httpd_args {
+    uint16_t port;
+    int max_requests;
+    int accept_timeout_ms;
+};
+
+static volatile int g_httpd_ready = 0;
+static volatile int g_httpd_done = 0;
+static volatile int g_httpd_served = 0;
+static volatile int g_httpd_pid = -1;
+static volatile int g_httpd_running = 0;
+static struct httpd_args g_httpd_args;
+
 void http_server_init(void) {
     fs_create_dir("/www");
     uint32_t sz = 0;
     if (fs_open("/www/index.html", &sz) != 0) {
         const char* html =
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-            "<title>MyOS</title></head>"
-            "<body><h1>MyOS HTTP Server</h1>"
+            "<title>KnitOS</title></head>"
+            "<body><h1>KnitOS HTTP Server</h1>"
             "<p>HTTP/1.1: GET, HEAD, OPTIONS, POST, PUT, gzip, access log.</p>"
             "<p>Edit files in <code>/www</code> on disk.</p>"
             "</body></html>";
         fs_write("/www/index.html", html, http_strlen(html));
     }
+}
+
+static void httpd_task(void* arg);
+
+int http_server_pid(void) {
+    return g_httpd_pid;
+}
+
+int http_server_ready(void) {
+    return g_httpd_ready;
+}
+
+int http_server_last_served(void) {
+    return g_httpd_served;
+}
+
+static void httpd_task(void* arg) {
+    struct httpd_args* a = (struct httpd_args*)arg;
+    g_httpd_pid = sched_current_id();
+    log_fmt3(LOG_INFO, "autotest", "httpd_kthread_ok", "pid", (uint32_t)g_httpd_pid,
+             "port", (uint32_t)a->port, "ok", 1u);
+    int n = http_server_run(a->port, a->max_requests, a->accept_timeout_ms);
+    g_httpd_served = n;
+    g_httpd_done = 1;
+    g_httpd_running = 0;
+    task_exit();
+}
+
+int http_server_start(uint16_t port, int max_requests, int accept_timeout_ms) {
+    if (g_httpd_running && !g_httpd_done) return -1;
+    if (ip_get_our_ip() == 0) return -1;
+    g_httpd_args.port = port;
+    g_httpd_args.max_requests = max_requests;
+    g_httpd_args.accept_timeout_ms = accept_timeout_ms;
+    g_httpd_ready = 0;
+    g_httpd_done = 0;
+    g_httpd_served = 0;
+    g_httpd_pid = -1;
+    g_httpd_running = 1;
+    int id = task_create(httpd_task, &g_httpd_args, "httpd");
+    if (id < 0) {
+        g_httpd_running = 0;
+        return -1;
+    }
+    task_enable_aspace(id);
+    return id;
+}
+
+/* Clear flags after task_kill (victim never reaches httpd_task epilogue). */
+void http_server_clear_state(void) {
+    g_httpd_done = 1;
+    g_httpd_running = 0;
+    g_httpd_ready = 0;
+    g_httpd_pid = -1;
+}
+
+int http_server_wait(int timeout_ms) {
+    uint32_t t0 = timer_ms();
+    while (!g_httpd_done) {
+        if (timeout_ms > 0 && (int)timer_ms_since(t0) >= timeout_ms) return 1;
+        nic_process_packets();
+        tcp_process_timers();
+        sched_yield();
+    }
+    return 0;
 }
 
 int http_server_run(uint16_t port, int max_requests, int accept_timeout_ms) {
@@ -495,9 +588,12 @@ int http_server_run(uint16_t port, int max_requests, int accept_timeout_ms) {
     if (accept_timeout_ms < 1000) accept_timeout_ms = 1000;
 
     http_server_init();
+    g_httpd_ready = 0;
 
     int sfd = socket_create(AF_INET, SOCK_STREAM, 0);
     if (sfd < 0) return -1;
+    socket_set_owner(sfd, "httpd", -1); /* current = httpd kthread pid */
+    if (g_httpd_pid < 0) g_httpd_pid = sched_current_id();
 
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
@@ -514,6 +610,7 @@ int http_server_run(uint16_t port, int max_requests, int accept_timeout_ms) {
     }
 
     log_fmt3(LOG_INFO, "http", "listen", "port", (uint32_t)port, "max", (uint32_t)max_requests, "ok", 1);
+    g_httpd_ready = 1;
     log_msg(LOG_INFO, "autotest", "http_ready");
     char ipbuf[16];
     ip_format_address(ip_get_our_ip(), ipbuf, sizeof(ipbuf));
@@ -529,17 +626,18 @@ int http_server_run(uint16_t port, int max_requests, int accept_timeout_ms) {
     static char body_buf[HTTP_BODY_MAX];
     static char pending_buf[HTTP_PENDING_MAX];
     int accept_waits = 0;
-    int idle_timeouts = 0;
-    const int max_idle_timeouts = 3; /* 3 * accept_timeout_ms idle -> exit after tests */
+    /* Wall-clock idle: exit only after this much quiet time post first request. */
+    const uint32_t idle_exit_ms = (uint32_t)accept_timeout_ms * 3u; /* e.g. 15s */
+    uint32_t last_activity_ms = timer_ms();
 
     while (served < max_requests) {
         int cfd = socket_accept(sfd, accept_timeout_ms);
         if (cfd < 0) {
             accept_waits++;
-            idle_timeouts++;
-            if (served > 0 && idle_timeouts >= max_idle_timeouts) {
+            uint32_t quiet = timer_ms_since(last_activity_ms);
+            if (served > 0 && quiet >= idle_exit_ms) {
                 log_fmt3(LOG_INFO, "http", "idle_done", "served", (uint32_t)served,
-                         "idle", (uint32_t)idle_timeouts, "port", (uint32_t)port);
+                         "quiet_ms", quiet, "port", (uint32_t)port);
                 terminal_writestring("\n[HTTP] idle done served=");
                 http_term_u32((uint32_t)served);
                 break;
@@ -554,7 +652,7 @@ int http_server_run(uint16_t port, int max_requests, int accept_timeout_ms) {
             continue;
         }
         accept_waits = 0;
-        idle_timeouts = 0;
+        last_activity_ms = timer_ms();
 
         log_msg(LOG_INFO, "http", "accept");
         terminal_writestring("\n[HTTP] accept");

@@ -28,6 +28,14 @@ int socket_send(int fd, const void* buf, size_t len);
 int socket_recv(int fd, void* buf, size_t len, int timeout_ms);
 int socket_close(int fd);
 
+/* Close every socket owned by pid. Returns number closed. */
+int socket_close_by_pid(int pid);
+
+/* Tag socket with service name / synthetic PID (shown in ports/netstat) */
+/* pid < 0 => use sched_current_id(); pid >= 0 stored as-is (0 = shell). */
+int socket_set_owner(int fd, const char* name, int pid);
+int socket_getsockname(int fd, struct sockaddr_in* addr);
+
 int socket_get_peer(int fd, uint32_t* ip, uint16_t* port);
 
 size_t socket_recv_available(int fd);

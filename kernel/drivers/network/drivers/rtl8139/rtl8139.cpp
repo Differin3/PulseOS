@@ -1,7 +1,14 @@
 #include "rtl8139.h"
 #include "../../nic.h"
 #include "drivers/pci/pci.h"
+#include "drivers/pic/pic.h"
 #include "serial_log.h"
+
+#define RTL8139_INTR_ROK 0x0001
+#define RTL8139_INTR_RER 0x0002
+#define RTL8139_INTR_TOK 0x0004
+#define RTL8139_INTR_TER 0x0008
+#define RTL8139_INTR_ENABLE (RTL8139_INTR_ROK | RTL8139_INTR_RER | RTL8139_INTR_TOK | RTL8139_INTR_TER)
 
 #define ETH_MAX_PACKET_SIZE 1514
 #define ETH_ZLEN              60
@@ -143,10 +150,10 @@ static int rtl8139_init_common(struct nic_device* nic) {
         outl(io + 0x08 + (uint16_t)(i * 4), 0xFFFFFFFFu);
     }
 
-    outw(io + RTL8139_INTR_MASK, 0x0000);
+    outw(io + RTL8139_ISR, 0xFFFF);
+    outw(io + RTL8139_INTR_MASK, RTL8139_INTR_ENABLE);
     outl(io + RTL8139_RX_CONFIG, 0x0F | (1 << 7));
     outl(io + RTL8139_TX_CONFIG, 0x03000700);
-    outw(io + RTL8139_ISR, 0xFFFF);
 
     uint32_t mac_low = inl(io + RTL8139_MAC0);
     uint16_t mac_high = inw(io + RTL8139_MAC4);
@@ -199,7 +206,32 @@ int rtl8139_init_with_pci(const struct pci_device* dev, struct nic_device* nic) 
 
     nic->io_base = (uint16_t)(dev->base_address[0] & 0xFFFFFFFC);
     nic->mem_base = 0;
+    nic->pci_bus = dev->bus;
+    nic->pci_device = dev->device;
+    nic->pci_function = dev->function;
+    uint32_t irq_reg = pci_read_config(dev->bus, dev->device, dev->function, 0x3C);
+    nic->irq_line = (uint8_t)(irq_reg & 0xFF);
     return rtl8139_init_common(nic);
+}
+
+void rtl8139_enable_irq(struct nic_device* nic) {
+    if (!nic || !nic->active) return;
+    outw(nic->io_base + RTL8139_INTR_MASK, RTL8139_INTR_ENABLE);
+    if (nic->irq_line > 0 && nic->irq_line < 16) {
+        pic_unmask(nic->irq_line);
+    }
+}
+
+void rtl8139_handle_irq(struct nic_device* nic) {
+    if (!nic || !nic->active) return;
+    uint16_t io = nic->io_base;
+    uint16_t isr = inw(io + RTL8139_ISR);
+    if (isr == 0) {
+        if (nic->irq_line) pic_eoi(nic->irq_line);
+        return;
+    }
+    outw(io + RTL8139_ISR, isr);
+    if (nic->irq_line) pic_eoi(nic->irq_line);
 }
 
 static bool rtl8139_tx_complete(uint16_t io, uint16_t tx_status_reg, uint32_t* status_out) {

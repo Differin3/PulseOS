@@ -30,9 +30,6 @@ void log_mirror_char(char c);
 void log_shell_cmd(const char* cwd, const char* cmd, size_t len);
 void log_driver_event(const char* name, const char* event);
 
-void debug_log_u32(const char* hypothesis_id, const char* location,
-                   const char* message, uint32_t a, uint32_t b, uint32_t c);
-
 // Двусторонний COM1: ввод с хоста (QEMU -serial tcp:...)
 char serial_poll_char(void);
 

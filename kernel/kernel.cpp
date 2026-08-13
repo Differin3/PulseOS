@@ -4,6 +4,7 @@
 #include "drivers/video/terminal.h"
 #include "drivers/storage/ata.h"
 #include "fs.h"
+#include "fs_autotest.h"
 #include "utils.h"
 #include "utils/nano.h"
 #include "drivers/storage/disk_manager.h"
@@ -23,7 +24,15 @@
 #include "drivers/network/network_config.h"
 #include "drivers/network/socket.h"
 #include "drivers/network/http_server.h"
+#include "drivers/network/core/netif.h"
+#include "drivers/network/core/net_ports.h"
+#include "drivers/network/protocols/route.h"
+#include "drivers/pic/pic.h"
+#include "drivers/timer/pit.h"
+#include "sched/task.h"
 #include "serial_log.h"
+#include "mm/paging.h"
+#include "vga_autotest.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -88,21 +97,52 @@ static const char* tcp_state_str(enum tcp_state s) {
     }
 }
 
-static void shell_write_port(uint16_t port) {
-    char tmp[8];
+static void shell_write_u32(uint32_t v) {
+    char tmp[12];
     int t = 0;
-    int v = port;
     if (v == 0) {
         terminal_putchar('0');
         return;
     }
-    while (v > 0) {
+    while (v > 0 && t < 11) {
         tmp[t++] = (char)('0' + (v % 10));
         v /= 10;
     }
     while (t > 0) {
         terminal_putchar(tmp[--t]);
     }
+}
+
+static void idle_kthread(void* arg) {
+    (void)arg;
+    while (1) {
+        asm volatile ("hlt");
+        sched_yield();
+    }
+}
+
+static void ps_shell_print(const struct task* t, void* userdata) {
+    int* count = (int*)userdata;
+    if (count) (*count)++;
+    terminal_writestring("\n");
+    shell_write_u32((uint32_t)t->id);
+    terminal_writestring("  ");
+    terminal_writestring(t->name);
+    terminal_writestring("  ");
+    uint8_t old = terminal_getcolor();
+    uint8_t stc = 0x07;
+    if (t->state == TASK_RUNNING || t->state == TASK_READY) stc = 0x0A;
+    else if (t->state == TASK_BLOCKED) stc = 0x0E;
+    else if (t->state == TASK_ZOMBIE) stc = 0x0C;
+    terminal_setcolor(stc);
+    terminal_writestring(task_state_str(t->state));
+    terminal_setcolor(old);
+    terminal_writestring("  runs=");
+    shell_write_u32(t->runs);
+}
+
+static void shell_write_port(uint16_t port) {
+    shell_write_u32(port);
 }
 
 static void netstat_shell_print(struct tcp_connection* conn, void* userdata) {
@@ -119,6 +159,50 @@ static void netstat_shell_print(struct tcp_connection* conn, void* userdata) {
     shell_write_port(conn->dest_port);
     terminal_writestring(" ");
     terminal_writestring(tcp_state_str(conn->state));
+    char owner[NET_OWNER_MAX];
+    int pid = 0;
+    net_ports_lookup_owner(NET_PROTO_TCP, conn->src_port, owner, sizeof(owner), &pid);
+    terminal_writestring("  pid=");
+    shell_write_u32((uint32_t)pid);
+    terminal_writestring(" ");
+    terminal_writestring(owner);
+}
+
+static void ports_shell_print(const struct net_port_info* info, void* userdata) {
+    struct arp_print_ctx* ctx = (struct arp_print_ctx*)userdata;
+    ctx->count++;
+    terminal_writestring("\n");
+    terminal_writestring(net_port_proto_str(info->proto));
+    terminal_writestring("  ");
+    shell_write_ip(info->local_ip);
+    terminal_putchar(':');
+    shell_write_port(info->local_port);
+    terminal_writestring("  ");
+    if (info->remote_port == 0 && info->remote_ip == 0) {
+        terminal_writestring("0.0.0.0:*");
+    } else {
+        shell_write_ip(info->remote_ip);
+        terminal_putchar(':');
+        shell_write_port(info->remote_port);
+    }
+    terminal_writestring("  ");
+    {
+        uint8_t old = terminal_getcolor();
+        uint8_t stc = 0x07;
+        if (info->state == NETPORT_LISTEN) stc = 0x0B;
+        else if (info->state == NETPORT_ESTABLISHED) stc = 0x0A;
+        terminal_setcolor(stc);
+        terminal_writestring(net_port_state_str(info->state));
+        terminal_setcolor(old);
+    }
+    terminal_writestring("  pid=");
+    shell_write_u32((uint32_t)info->pid);
+    terminal_writestring("  ");
+    terminal_writestring(info->owner);
+    if (info->sock_fd >= 0) {
+        terminal_writestring("  fd=");
+        shell_write_u32((uint32_t)info->sock_fd);
+    }
 }
 
 // Порты для системных операций
@@ -131,68 +215,74 @@ static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg) {
     return fg | bg << 4;
 }
 
-// Точка входа ядра
-extern "C" void kernel_main() {
-    // Инициализация терминала
+// Точка входа ядра (multiboot2 info pointer; 0 if unavailable)
+extern "C" void kernel_main(uint32_t multiboot_info) {
     terminal_initialize();
     serial_init();
     log_msg(LOG_INFO, "kernel", "boot " KERNEL_VERSION " (" KERNEL_BUILD ")");
     
-    // Вспомогательная функция для цветного вывода статуса
     auto print_status = [](const char* status, const char* message, uint8_t color) {
         uint8_t old_color = terminal_getcolor();
         terminal_setcolor(color);
         terminal_writestring("[");
-        terminal_writestring(status);
+        /* Align tag to 4 chars: OK/FAIL/WARN */
+        const char* tag = status ? status : "";
+        char padded[5] = {' ', ' ', ' ', ' ', 0};
+        size_t n = 0;
+        while (tag[n] && n < 4) { padded[n] = tag[n]; n++; }
+        terminal_writestring(padded);
         terminal_writestring("] ");
         terminal_setcolor(old_color);
         terminal_writestring(message);
         log_msg(LOG_INFO, "boot", message);
     };
     
-    // Вывод статусов с цветами (первые 3 строки фиксированы)
     terminal_set_cursor(0, 0);
-    print_status("OK", "VGA initialized", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    print_status("OK", "KnitOS VGA console", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     
     terminal_set_cursor(1, 0);
-    terminal_writestring("[");
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-    terminal_writestring("OK");
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-    terminal_writestring("] Kernel ");
-    terminal_writestring(KERNEL_VERSION);
-    terminal_writestring(" (");
-    terminal_writestring(KERNEL_BUILD);
-    terminal_writestring(")");
+    print_status("OK", "Kernel " KERNEL_VERSION " (" KERNEL_BUILD ")",
+                 vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     
     terminal_set_cursor(2, 0);
-    print_status("OK", "Mode: 32-bit polling", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    print_status("OK", "Mode: 32-bit", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     
-    // Инициализация менеджера драйверов
     terminal_set_cursor(3, 0);
     if (driver_manager_init() == 0) {
-        print_status("OK", "Driver manager initialized", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+        print_status("OK", "Driver manager", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     } else {
-        print_status("FAIL", "Driver manager init failed", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+        print_status("FAIL", "Driver manager", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
     }
     int current_row = 4;
     
-    // Инициализация IDT (прерывания и системные вызовы)
     terminal_set_cursor(current_row, 0);
     idt_init();
-    print_status("OK", "IDT initialized", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    print_status("OK", "IDT", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    current_row++;
+
+    paging_init();
+    terminal_init_graphics(multiboot_info);
+    terminal_set_cursor(current_row, 0);
+    if (terminal_using_framebuffer()) {
+        print_status("OK", "Paging + FB 1024x768", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    } else {
+        print_status("OK", "Paging (VGA text 80x25)", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    }
+    current_row++;
+
+    pic_remap();
+    pit_init();
+    terminal_set_cursor(current_row, 0);
+    print_status("OK", "PIT 100Hz", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     current_row++;
     
-    // Инициализация системных вызовов
     terminal_set_cursor(current_row, 0);
     syscall_init();
-    print_status("OK", "System calls initialized", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    print_status("OK", "Syscalls", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     current_row++;
     
-    // Автоматическое сканирование устройств (PCI, NIC и контроллеры хранения)
     driver_scan_devices();
     
-    // Инициализация менеджера дисков (строит список дисков на основе зарегистрированных storage-драйверов)
     disk_manager_init();
     
     // Начинаем вывод статусов сразу под последней строкой отладочного вывода
@@ -343,6 +433,10 @@ extern "C" void kernel_main() {
         terminal_set_cursor((size_t)current_row, 0);
     };
 
+    /* IRQ до сети/FS write: иначе net_wait_ms и AHCI ждут вечно (jiffies=0). */
+    keyboard_init();
+    interrupts_enable();
+
     boot_advance_row();
     if (network_config_apply_boot() == 0 && ip_get_our_ip() != 0) {
         char netmsg[40];
@@ -373,27 +467,91 @@ extern "C" void kernel_main() {
     
     // Инициализация системы утилит
     utils_init();
+
+    sched_init();
+    {
+        int idle_id = task_create(idle_kthread, 0, "idle");
+        if (idle_id < 0 || task_set_idle(idle_id) != 0) {
+            print_status("WARN", "sched: idle create failed", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+            boot_advance_row();
+        } else {
+            print_status("OK", "Scheduler (systemd+idle)", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+            boot_advance_row();
+        }
+        if (dhcp_start_service() >= 0) {
+            print_status("OK", "dhcpd kthread", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+            boot_advance_row();
+        }
+    }
     
-    keyboard_init();
     boot_advance_row();
-    print_status("OK", "Keyboard ready. Type something:", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    print_status("OK", "Keyboard ready", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     boot_advance_row();
+
+    /* Clear boot spam from viewport; keep details on serial */
+    terminal_clear_viewport();
+    terminal_set_cursor(0, 0);
+    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
+    terminal_writestring(KERNEL_NAME);
+    terminal_writestring(" ");
+    terminal_writestring(KERNEL_VERSION);
+    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    if (terminal_using_framebuffer()) {
+        terminal_writestring("  fb ");
+        shell_write_u32(terminal_fb_width());
+        terminal_writestring("x");
+        shell_write_u32(terminal_fb_height());
+    } else {
+        terminal_writestring("  text 80x25");
+    }
+    terminal_writestring("  tasks=");
+    shell_write_u32((uint32_t)sched_task_count());
+    terminal_putchar('\n');
     
     char line[128];
     size_t line_len = 0;
-    size_t prompt_row = (size_t)current_row;
+    size_t prompt_row = terminal_get_row();
     size_t prompt_col = 0;
-    
+
+    auto refresh_status_line = [&]() {
+        char buf[96];
+        size_t n = 0;
+        auto put = [&](const char* s) {
+            while (*s && n + 1 < sizeof(buf)) buf[n++] = *s++;
+        };
+        auto put_u = [&](uint32_t v) {
+            char tmp[12]; int t = 0;
+            if (v == 0) tmp[t++] = '0';
+            else while (v && t < 11) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+            while (t > 0 && n + 1 < sizeof(buf)) buf[n++] = tmp[--t];
+        };
+        put("up=");
+        put_u(timer_ms() / 1000);
+        put("s ip=");
+        char ipb[20];
+        ip_format_address(ip_get_our_ip(), ipb, sizeof(ipb));
+        put(ipb[0] ? ipb : "0.0.0.0");
+        put(" httpd=");
+        put_u((uint32_t)(http_server_pid() < 0 ? 0 : http_server_pid()));
+        put(" dhcpd=");
+        put_u((uint32_t)(dhcp_service_pid() < 0 ? 0 : dhcp_service_pid()));
+        buf[n] = 0;
+        terminal_status_set(buf);
+    };
     
     auto prompt_print = [&]() {
+        refresh_status_line();
         terminal_set_cursor(prompt_row, 0);
+        uint8_t old = terminal_getcolor();
+        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
         const char* cwd = utils_get_current_directory();
-        if (cwd) {
-            terminal_writestring(cwd);
-            terminal_writestring(" > ");
-        } else {
-            terminal_writestring("/ > ");
-        }
+        terminal_writestring(cwd ? cwd : "/");
+        terminal_setcolor(vga_entry_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK));
+        terminal_writestring(" pid=");
+        shell_write_u32((uint32_t)sched_current_id());
+        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
+        terminal_writestring(" > ");
+        terminal_setcolor(old);
         prompt_col = terminal_get_column();
     };
     
@@ -407,26 +565,12 @@ extern "C" void kernel_main() {
     };
     
     auto cmd_clear = [&]() {
-        terminal_initialize();
+        terminal_clear_viewport();
         terminal_set_cursor(0, 0);
-        terminal_writestring("[");
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-        terminal_writestring("OK");
+        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
+        terminal_writestring(KERNEL_NAME);
         terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-        terminal_writestring("] VGA initialized");
-        terminal_set_cursor(1, 0);
-        terminal_writestring("[");
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-        terminal_writestring("OK");
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-        terminal_writestring("] Kernel "); terminal_writestring(KERNEL_VERSION); terminal_writestring(" ("); terminal_writestring(KERNEL_BUILD); terminal_writestring(")");
-        terminal_set_cursor(2, 0);
-        terminal_writestring("[");
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-        terminal_writestring("OK");
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-        terminal_writestring("] Mode: 32-bit polling");
-        terminal_set_cursor(4, 0);
+        terminal_putchar('\n');
         prompt_row = terminal_get_row();
         prompt_print();
     };
@@ -619,13 +763,20 @@ extern "C" void kernel_main() {
             terminal_writestring("\n  write <file> <text>   nano <file>  full-screen editor");
             terminal_writestring("\nSystem:");
             terminal_writestring("\n  clear   echo   version   disk   reboot   shutdown");
+            terminal_writestring("\n  ps                     tasks (systemd=0, idle, ...)");
+            terminal_writestring("\n  kill [-9] <pid>         terminate kthread (not systemd/idle)");
             terminal_writestring("\n  resolution <H>   log [off|err|info|debug]");
             terminal_writestring("\nNetwork:");
             terminal_writestring("\n  network   dhcp   ping <host>   httpget <host>");
             terminal_writestring("\n  network save|reload|static <ip> [gw] [dns] [mask]");
             terminal_writestring("\n  udp/tcp/udplisten/tcp listen   dns   arp   route   netstat");
+            terminal_writestring("\n  ports                 TCP/UDP table (port, state, pid, process)");
+            terminal_writestring("\n  port close tcp|udp <n>  close listening port");
             terminal_writestring("\n  socktest tcp|udp <port>  socket API echo test");
             terminal_writestring("\n  httpserver [port] [max]  HTTP/1.1 server (/www, Keep-Alive)");
+            terminal_writestring("\n  autotest fs             FS create/write/read/delete test");
+            terminal_writestring("\n  autotest vga            VGA/FB console smoke test");
+            terminal_writestring("\n  autotest network [port] [max]  CI network + FS + HTTP");
             terminal_writestring("\nKeyboard:");
             terminal_writestring("\n  Tab          autocomplete (2x=list, 3x=cycle)");
             terminal_writestring("\n  Shift+key    special chars: ? ! @ * ( ) - _ + etc.");
@@ -1069,7 +1220,9 @@ extern "C" void kernel_main() {
             cmd_clear(); return;
         }
         if (len==7 && cmd[0]=='v'&&cmd[1]=='e'&&cmd[2]=='r'&&cmd[3]=='s'&&cmd[4]=='i'&&cmd[5]=='o'&&cmd[6]=='n') {
-            terminal_writestring("\nKernel ");
+            terminal_writestring("\n");
+            terminal_writestring(KERNEL_NAME);
+            terminal_writestring(" ");
             terminal_writestring(KERNEL_VERSION);
             terminal_writestring(" (");
             terminal_writestring(KERNEL_BUILD);
@@ -1229,6 +1382,25 @@ extern "C" void kernel_main() {
                 terminal_writestring("\nStatus: Active");
             } else {
                 terminal_writestring("\nStatus: Not initialized");
+            }
+
+            struct netif* nif = netif_default();
+            if (nif) {
+                terminal_writestring("\nInterface: ");
+                terminal_writestring(nif->name);
+                terminal_writestring(" hw=");
+                if (nif->hw_type == NETIF_HW_VIRTIO) terminal_writestring("virtio");
+                else if (nif->hw_type == NETIF_HW_PCNET) terminal_writestring("pcnet");
+                else if (nif->hw_type == NETIF_HW_RTL8139) terminal_writestring("rtl8139");
+                else terminal_writestring("?");
+                terminal_writestring("\nStats RX/TX/drop/irq: ");
+                shell_write_u32(nif->stats.rx_packets);
+                terminal_writestring("/");
+                shell_write_u32(nif->stats.tx_packets);
+                terminal_writestring("/");
+                shell_write_u32(nif->stats.rx_dropped);
+                terminal_writestring("/");
+                shell_write_u32(nif->stats.irq_count);
             }
             flush_line(); return;
         }
@@ -1513,6 +1685,9 @@ extern "C" void kernel_main() {
                     terminal_writestring("\nFailed to listen (port busy or no IP)");
                     flush_line(); return;
                 }
+                net_ports_register(NET_PROTO_TCP, NETPORT_LISTEN,
+                                   ip_get_our_ip(), port, 0, 0,
+                                   -1, -1, "tcplisten");
 
                 terminal_writestring("\nTCP echo on port ");
                 shell_write_port(port);
@@ -1542,6 +1717,7 @@ extern "C" void kernel_main() {
                 }
 
                 tcp_connection_close(listen_conn);
+                net_ports_release_listen(NET_PROTO_TCP, port);
                 flush_line(); return;
             }
         }
@@ -1722,7 +1898,29 @@ extern "C" void kernel_main() {
             }
         }
 
-        // autotest network [port] [max] — CI: dhcp, /www, HTTP server (markers on serial)
+        // autotest fs — CI: create/write/read/list/delete + fsck
+        if (len >= 11 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
+            cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
+            cmd[9]=='f'&&cmd[10]=='s' && (len == 11 || cmd[11] == ' ' || cmd[11] == 0)) {
+            if (fs_autotest_run() != 0) {
+                terminal_writestring("\n[AUTOTEST] fs failed");
+                log_msg(LOG_ERR, "autotest", "fs_failed");
+            }
+            flush_line(); return;
+        }
+
+        // autotest vga — console + framebuffer smoke
+        if (len >= 12 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
+            cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
+            cmd[9]=='v'&&cmd[10]=='g'&&cmd[11]=='a' && (len == 12 || cmd[12] == ' ' || cmd[12] == 0)) {
+            if (vga_autotest_run() != 0) {
+                terminal_writestring("\n[AUTOTEST] vga failed");
+                log_msg(LOG_ERR, "autotest", "vga_failed");
+            }
+            flush_line(); return;
+        }
+
+        // autotest network [port] [max] — CI: fs, dhcp, /www, HTTP server (markers on serial)
         if (len >= 16 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
             cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
             cmd[9]=='n'&&cmd[10]=='e'&&cmd[11]=='t'&&cmd[12]=='w'&&cmd[13]=='o'&&
@@ -1747,6 +1945,18 @@ extern "C" void kernel_main() {
             terminal_writestring("\n[AUTOTEST] network start");
             log_msg(LOG_INFO, "autotest", "start");
 
+            if (fs_autotest_run() != 0) {
+                terminal_writestring("\n[AUTOTEST] fs failed");
+                log_msg(LOG_ERR, "autotest", "fs_failed");
+                flush_line(); return;
+            }
+
+            if (vga_autotest_run() != 0) {
+                terminal_writestring("\n[AUTOTEST] vga failed");
+                log_msg(LOG_ERR, "autotest", "vga_failed");
+                flush_line(); return;
+            }
+
             terminal_writestring("\n[AUTOTEST] dhcp...");
             if (network_config_acquire_dhcp() != 0) {
                 terminal_writestring("\n[AUTOTEST] dhcp failed");
@@ -1755,10 +1965,16 @@ extern "C" void kernel_main() {
             }
             terminal_writestring("\n[AUTOTEST] dhcp ok");
             log_msg(LOG_INFO, "autotest", "dhcp_ok");
+            if (dhcp_start_service() < 0) {
+                terminal_writestring("\n[AUTOTEST] dhcpd start failed");
+                log_msg(LOG_ERR, "autotest", "dhcpd_start_failed");
+            } else {
+                for (int i = 0; i < 32 && dhcp_service_pid() < 0; i++) sched_yield();
+            }
 
             uint32_t dns_ip = 0;
-            dns_add_record("myos.local", ip_get_our_ip());
-            if (dns_resolve("myos.local", &dns_ip) == 0 && dns_ip == ip_get_our_ip()) {
+            dns_add_record("knitos.local", ip_get_our_ip());
+            if (dns_resolve("knitos.local", &dns_ip) == 0 && dns_ip == ip_get_our_ip()) {
                 terminal_writestring("\n[AUTOTEST] dns ok");
                 log_fmt3(LOG_INFO, "autotest", "dns_ok", "ip", dns_ip, "ok", 1u, "port", 0u);
             } else {
@@ -1766,6 +1982,33 @@ extern "C" void kernel_main() {
                 log_msg(LOG_ERR, "autotest", "dns failed");
                 flush_line(); return;
             }
+
+            terminal_writestring("\n[AUTOTEST] ports...");
+            int ports_rc = net_ports_autotest();
+            if (ports_rc != 0) {
+                terminal_writestring("\n[AUTOTEST] ports failed rc=");
+                shell_write_u32((uint32_t)(ports_rc < 0 ? (uint32_t)(-ports_rc) : (uint32_t)ports_rc));
+                log_fmt3(LOG_ERR, "autotest", "ports_failed", "rc",
+                         (uint32_t)(ports_rc < 0 ? (uint32_t)(-ports_rc) : (uint32_t)ports_rc),
+                         "ok", 0u, "x", 0u);
+                flush_line(); return;
+            }
+            terminal_writestring("\n[AUTOTEST] ports ok");
+            log_msg(LOG_INFO, "autotest", "ports_ok");
+
+            terminal_writestring("\n[AUTOTEST] sched...");
+            int sched_rc = sched_autotest();
+            if (sched_rc != 0) {
+                terminal_writestring("\n[AUTOTEST] sched failed rc=");
+                shell_write_u32((uint32_t)(sched_rc < 0 ? (uint32_t)(-sched_rc) : (uint32_t)sched_rc));
+                log_fmt3(LOG_ERR, "autotest", "sched_failed", "rc",
+                         (uint32_t)(sched_rc < 0 ? (uint32_t)(-sched_rc) : (uint32_t)sched_rc),
+                         "ok", 0u, "x", 0u);
+                flush_line(); return;
+            }
+            terminal_writestring("\n[AUTOTEST] sched ok");
+            log_msg(LOG_INFO, "autotest", "sched_ok");
+            /* sleep_ok is logged inside sched_autotest on success */
 
             http_server_init();
             const char* test_body = "hello-from-guest";
@@ -1787,7 +2030,49 @@ extern "C" void kernel_main() {
             terminal_writestring(mb);
             log_fmt3(LOG_INFO, "autotest", "prep", "port", (uint32_t)port,
                      "max", (uint32_t)max_req, "ip", ip_get_our_ip());
-            int n = http_server_run(port, max_req, 5000);
+
+            /* Kill-smoke on alternate port before main server */
+            {
+                int kid = http_server_start(18080, 64, 2000);
+                if (kid > 0) {
+                    uint32_t w0 = timer_ms();
+                    while (!http_server_ready() && timer_ms_since(w0) < 3000) sched_yield();
+                    if (http_server_ready() && net_ports_busy(NET_PROTO_TCP, 18080)) {
+                        task_kill(kid);
+                        http_server_clear_state();
+                        uint32_t w1 = timer_ms();
+                        while (net_ports_busy(NET_PROTO_TCP, 18080) && timer_ms_since(w1) < 2000)
+                            sched_yield();
+                        if (!net_ports_busy(NET_PROTO_TCP, 18080))
+                            log_msg(LOG_INFO, "autotest", "httpd_kill_ok");
+                    } else {
+                        task_kill(kid);
+                        http_server_clear_state();
+                    }
+                }
+            }
+
+            int hid = http_server_start(port, max_req, 5000);
+            if (hid < 0) {
+                terminal_writestring("\n[AUTOTEST] httpd start failed");
+                log_msg(LOG_ERR, "autotest", "httpd_start_failed");
+                flush_line(); return;
+            }
+            {
+                uint32_t w0 = timer_ms();
+                while (!http_server_ready() && timer_ms_since(w0) < 5000) {
+                    nic_process_packets();
+                    sched_yield();
+                }
+            }
+            if (!http_server_ready()) {
+                terminal_writestring("\n[AUTOTEST] http ready timeout");
+                log_msg(LOG_ERR, "autotest", "http_ready_timeout");
+                flush_line(); return;
+            }
+
+            http_server_wait(0); /* until idle_done / max */
+            int n = http_server_last_served();
             log_fmt3(LOG_INFO, "autotest", "http_done", "served", (uint32_t)(n < 0 ? 0 : n),
                      "port", (uint32_t)port, "ok", n >= 0 ? 1u : 0u);
             terminal_writestring("\n[AUTOTEST] http_done served=");
@@ -1834,8 +2119,16 @@ extern "C" void kernel_main() {
             while (t > 0 && pi < 7) pb[pi++] = tmp[--t];
             pb[pi] = 0;
             terminal_writestring(pb);
-            terminal_writestring(" — waiting for connections (run curl on host now)...");
-            int n = http_server_run(port, max_req, 5000);
+            terminal_writestring(" — httpd kthread (curl on host)...");
+            int hid = http_server_start(port, max_req, 5000);
+            if (hid < 0) {
+                terminal_writestring("\nhttpserver start failed");
+                flush_line(); return;
+            }
+            terminal_writestring("\npid=");
+            shell_write_u32((uint32_t)hid);
+            http_server_wait(0);
+            int n = http_server_last_served();
             if (n < 0) {
                 terminal_writestring("\nhttpserver failed (port busy?)");
             } else {
@@ -1903,7 +2196,7 @@ extern "C" void kernel_main() {
                 for (size_t h = 0; h < host_len && rp + 1 < sizeof(req); h++) {
                     req[rp++] = cmd[host_start + h];
                 }
-                req_put("\r\nConnection: close\r\nAccept: */*\r\nUser-Agent: MyOS-httpget/1.1\r\n\r\n");
+                req_put("\r\nConnection: close\r\nAccept: */*\r\nUser-Agent: KnitOS-httpget/1.1\r\n\r\n");
                 req[rp] = 0;
 
                 struct tcp_connection* conn = tcp_connect(dest_ip, 80);
@@ -2019,6 +2312,114 @@ extern "C" void kernel_main() {
             flush_line(); return;
         }
 
+        // ps — список kernel tasks
+        if (len == 2 && cmd[0] == 'p' && cmd[1] == 's') {
+            terminal_writestring("\nPID  NAME  STATE  RUNS");
+            int count = 0;
+            sched_foreach(ps_shell_print, &count);
+            if (count == 0) {
+                terminal_writestring("\n(none)");
+            }
+            flush_line(); return;
+        }
+
+        // kill [-9] <pid> — как kill -9 в Linux (hard terminate kthread)
+        if (len >= 4 && cmd[0]=='k'&&cmd[1]=='i'&&cmd[2]=='l'&&cmd[3]=='l' &&
+            (len == 4 || cmd[4] == ' ')) {
+            size_t pos = 4;
+            while (pos < len && cmd[pos] == ' ') pos++;
+            if (pos + 2 <= len && cmd[pos] == '-' && cmd[pos + 1] == '9') {
+                pos += 2;
+                while (pos < len && cmd[pos] == ' ') pos++;
+            }
+            if (pos >= len || cmd[pos] < '0' || cmd[pos] > '9') {
+                terminal_writestring("\nUsage: kill [-9] <pid>");
+                flush_line(); return;
+            }
+            uint32_t pidv = 0;
+            while (pos < len && cmd[pos] >= '0' && cmd[pos] <= '9') {
+                pidv = pidv * 10 + (uint32_t)(cmd[pos] - '0');
+                if (pidv > 0x7FFFFFFFu) {
+                    terminal_writestring("\nInvalid pid");
+                    flush_line(); return;
+                }
+                pos++;
+            }
+            int rc = task_kill((int)pidv);
+            if (rc == 0) {
+                terminal_writestring("\nKilled ");
+                shell_write_u32(pidv);
+            } else if (rc == -2) {
+                terminal_writestring("\nOperation not permitted");
+            } else {
+                terminal_writestring("\nNo such process");
+            }
+            flush_line(); return;
+        }
+
+        // ports — таблица портов (proto, addrs, state, pid, process)
+        if (len == 5 && cmd[0]=='p'&&cmd[1]=='o'&&cmd[2]=='r'&&cmd[3]=='t'&&cmd[4]=='s') {
+            net_ports_sync_tcp();
+            terminal_writestring("\nProto  Local                 Remote               State         PID  Process");
+            struct arp_print_ctx ctx = { 0 };
+            net_ports_foreach(ports_shell_print, &ctx);
+            if (ctx.count == 0) {
+                terminal_writestring("\n(none)");
+            } else {
+                terminal_writestring("\n(");
+                shell_write_u32((uint32_t)ctx.count);
+                terminal_writestring(" entries)");
+            }
+            flush_line(); return;
+        }
+
+        // port close tcp|udp <port>
+        if (len >= 10 && cmd[0]=='p'&&cmd[1]=='o'&&cmd[2]=='r'&&cmd[3]=='t'&&cmd[4]==' ') {
+            size_t pos = 5;
+            while (pos < len && cmd[pos] == ' ') pos++;
+            bool is_close = (pos + 5 <= len && cmd[pos]=='c'&&cmd[pos+1]=='l'&&cmd[pos+2]=='o'&&
+                             cmd[pos+3]=='s'&&cmd[pos+4]=='e');
+            if (!is_close) {
+                terminal_writestring("\nUsage: ports | port close tcp|udp <port>");
+                flush_line(); return;
+            }
+            pos += 5;
+            while (pos < len && cmd[pos] == ' ') pos++;
+            uint8_t proto = 0;
+            if (pos + 3 <= len && cmd[pos]=='t'&&cmd[pos+1]=='c'&&cmd[pos+2]=='p') {
+                proto = NET_PROTO_TCP;
+                pos += 3;
+            } else if (pos + 3 <= len && cmd[pos]=='u'&&cmd[pos+1]=='d'&&cmd[pos+2]=='p') {
+                proto = NET_PROTO_UDP;
+                pos += 3;
+            } else {
+                terminal_writestring("\nUsage: port close tcp|udp <port>");
+                flush_line(); return;
+            }
+            while (pos < len && cmd[pos] == ' ') pos++;
+            uint16_t port = 0;
+            while (pos < len && cmd[pos] >= '0' && cmd[pos] <= '9') {
+                port = (uint16_t)(port * 10 + (cmd[pos] - '0'));
+                pos++;
+            }
+            if (port == 0) {
+                terminal_writestring("\nInvalid port");
+                flush_line(); return;
+            }
+            if (net_ports_close_listen(proto, port) != 0) {
+                terminal_writestring("\nNo listening ");
+                terminal_writestring(net_port_proto_str(proto));
+                terminal_writestring(" port ");
+                shell_write_port(port);
+            } else {
+                terminal_writestring("\nClosed ");
+                terminal_writestring(net_port_proto_str(proto));
+                terminal_writestring("/");
+                shell_write_port(port);
+            }
+            flush_line(); return;
+        }
+
         // socktest tcp|udp <port> — тест Socket API
         if (len >= 13 && cmd[0]=='s'&&cmd[1]=='o'&&cmd[2]=='c'&&cmd[3]=='k'&&cmd[4]=='t'&&
             cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' ') {
@@ -2049,6 +2450,7 @@ extern "C" void kernel_main() {
                 terminal_writestring("\nsocket() failed");
                 flush_line(); return;
             }
+            socket_set_owner(sfd, "socktest", NET_PID_SOCKTEST);
             struct sockaddr_in addr;
             addr.sin_family = AF_INET;
             addr.sin_port = port;
@@ -2119,13 +2521,30 @@ extern "C" void kernel_main() {
         if (len >= 5 && cmd[0] == 'r' && cmd[1] == 'o' && cmd[2] == 'u' &&
             cmd[3] == 't' && cmd[4] == 'e') {
             if (len == 5) {
-                terminal_writestring("\n=== Routing ===");
+                terminal_writestring("\n=== Routing table ===");
+                int rc = route_count();
+                if (rc == 0) {
+                    terminal_writestring("\n(empty — using connected/default helpers)");
+                }
+                for (int i = 0; i < rc; i++) {
+                    const struct route_entry* re = route_get(i);
+                    if (!re) continue;
+                    terminal_writestring("\n");
+                    shell_write_ip(re->dest);
+                    terminal_writestring("/");
+                    shell_write_ip(re->mask);
+                    terminal_writestring(" via ");
+                    if (re->gateway) shell_write_ip(re->gateway);
+                    else terminal_writestring("on-link");
+                    if (re->nif) {
+                        terminal_writestring(" dev ");
+                        terminal_writestring(re->nif->name);
+                    }
+                }
                 terminal_writestring("\nIP: ");
                 uint32_t ip = ip_get_our_ip();
                 if (ip != 0) shell_write_ip(ip);
                 else terminal_writestring("Not set");
-                terminal_writestring("\nMask: ");
-                shell_write_ip(ip_get_subnet_mask());
                 terminal_writestring("\nGateway: ");
                 uint32_t gw = ip_get_gateway();
                 if (gw != 0) shell_write_ip(gw);
@@ -2154,9 +2573,9 @@ extern "C" void kernel_main() {
     };
 
     static const char* shell_commands[] = {
-        "help", "ls", "find", "cd", "pwd", "clear", "echo", "version", "disk",
+        "help", "ls", "find", "cd", "pwd", "clear", "echo", "version", "disk", "ps", "kill",
         "cat", "nano", "write", "rm", "reboot", "shutdown", "resolution", "test",
-        "network", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "httpget", "httpserver", "dns", "arp", "netstat", "route", "socktest", "log", 0
+        "network", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "httpget", "httpserver", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "log", "autotest", 0
     };
     static const char* network_subcommands[] = { "static", "save", "reload", 0 };
     static const char* log_subcommands[] = { "off", "err", "info", "debug", "test", 0 };
@@ -2551,26 +2970,16 @@ extern "C" void kernel_main() {
         tab_show_matches(match_count, matches);
     };
 
-    // Главный цикл: polling + таймеры независимо от RX
-    uint32_t network_poll_counter = 0;
-    uint32_t network_timer_counter = 0;
+    // Главный цикл: softirq net_process + TCP/DHCP на PIT time
+    uint32_t last_timer_ms = timer_ms();
     while (1) {
-        if (nic_has_packet()) {
-            nic_process_packets();
-        } else {
-            network_poll_counter++;
-            if (network_poll_counter >= 100) {
-                nic_process_packets();
-                network_poll_counter = 0;
-            }
-        }
+        nic_process_packets();
 
-        network_timer_counter++;
-        if (network_timer_counter >= 100) {
+        uint32_t now_ms = timer_ms();
+        if (now_ms - last_timer_ms >= 10) {
             tcp_process_timers();
-            tcp_increment_time();
             dhcp_poll();
-            network_timer_counter = 0;
+            last_timer_ms = now_ms;
         }
         
         char c = poll_scancode();
@@ -2585,8 +2994,13 @@ extern "C" void kernel_main() {
                 history_down();
             } else if (c == 5) {
                 terminal_scroll_page_up();
+                refresh_status_line();
             } else if (c == 6) {
                 terminal_scroll_page_down();
+                refresh_status_line();
+            } else if (c == 12 || (keyboard_ctrl_down() && (c == 'l' || c == 'L'))) {
+                line_len = 0;
+                cmd_clear();
             } else if (c == '\n') {
                 line[line_len] = 0;
                 if (line_len > 0) history_push(line, line_len);
@@ -2621,8 +3035,8 @@ extern "C" void kernel_main() {
                 }
             }
         }
-        // Небольшая пауза для снижения нагрузки на CPU
-        for (volatile int i = 0; i < 1000; i++);
+        sched_maybe_preempt();
+        sched_yield();
     }
 }
 

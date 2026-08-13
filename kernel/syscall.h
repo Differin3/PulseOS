@@ -21,6 +21,9 @@
 #define SYS_SEND        12
 #define SYS_RECV        13
 #define SYS_SOCK_CLOSE  14
+#define SYS_EXIT        15
+#define SYS_YIELD       16
+#define SYS_RING3_DONE  17
 
 // Структура для передачи параметров системного вызова
 struct syscall_args {

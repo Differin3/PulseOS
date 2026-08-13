@@ -4,7 +4,7 @@ cd /d "%~dp0\.."
 
 echo.
 echo ============================================================
-echo   MyOS — manual network tests (CMD)
+echo   KnitOS — manual network tests (CMD)
 echo ============================================================
 echo.
 echo  1. build.bat

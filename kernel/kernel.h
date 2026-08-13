@@ -9,6 +9,7 @@
 #define VGA_HEIGHT 25  // Стабильный режим 80x25
 #define VGA_MEMORY 0xB8000
 
+#define KERNEL_NAME    "KnitOS"
 #define KERNEL_VERSION "0.2.5"
 #define KERNEL_BUILD   "dev-disk-AHCI-PCI"
 

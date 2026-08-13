@@ -203,24 +203,6 @@ void log_ip(int level, const char* tag, const char* message, uint32_t ip) {
     ser_puts("\n");
 }
 
-void debug_log_u32(const char* hypothesis_id, const char* location,
-                   const char* message, uint32_t a, uint32_t b, uint32_t c) {
-    if (LOG_DBG > g_log_level || g_log_level == LOG_OFF) return;
-    ser_puts("{\"sessionId\":\"myos\",\"hypothesisId\":\"");
-    ser_puts(hypothesis_id ? hypothesis_id : "");
-    ser_puts("\",\"location\":\"");
-    ser_puts(location ? location : "");
-    ser_puts("\",\"message\":\"");
-    ser_puts(message ? message : "");
-    ser_puts("\",\"data\":{\"a\":");
-    ser_put_hex32(a);
-    ser_puts(",\"b\":");
-    ser_put_hex32(b);
-    ser_puts(",\"c\":");
-    ser_put_hex32(c);
-    ser_puts("}}\n");
-}
-
 char serial_poll_char(void) {
     if (g_telnet_skip > 0) {
         g_telnet_skip--;

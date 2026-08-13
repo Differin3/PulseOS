@@ -1,6 +1,7 @@
 #include "keyboard.h"
 #include "kernel.h"
 #include "driver_manager.h"
+#include "drivers/pic/pic.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -75,25 +76,6 @@ static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-// Инициализация PIC
-static void pic_remap() {
-    // ICW1
-    outb(0x20, 0x11);
-    outb(0xA0, 0x11);
-    // ICW2
-    outb(0x21, 0x20);
-    outb(0xA1, 0x28);
-    // ICW3
-    outb(0x21, 0x04);
-    outb(0xA1, 0x02);
-    // ICW4
-    outb(0x21, 0x01);
-    outb(0xA1, 0x01);
-    // Полная маска IRQ (ввод только через polling)
-    outb(0x21, 0xFF);
-    outb(0xA1, 0xFF);
-}
-
 // Ждать пока входной буфер контроллера свободен (бит1=0)
 static void ps2_wait_input_clear() {
     for (int i = 0; i < 100000; i++) {
@@ -119,9 +101,18 @@ extern "C" void keyboard_handler_main() {
 
     keyboard_modifiers_update(scancode, false);
 
-    if (scancode & 0x80) return;
-    if (scancode == 0x2A || scancode == 0x36 || scancode == 0x1D) return;
-    if (scancode >= SCANCODE_TABLE_SIZE) return;
+    if (scancode & 0x80) {
+        pic_eoi(1);
+        return;
+    }
+    if (scancode == 0x2A || scancode == 0x36 || scancode == 0x1D) {
+        pic_eoi(1);
+        return;
+    }
+    if (scancode >= SCANCODE_TABLE_SIZE) {
+        pic_eoi(1);
+        return;
+    }
 
     char c = keyboard_scancode_char(scancode);
     if (c != 0) {
@@ -185,10 +176,10 @@ static int keyboard_driver_ioctl(void* device_data, uint32_t cmd, void* arg) {
 
 // Инициализация клавиатуры
 void keyboard_init() {
-    pic_remap();
     ps2_enable_keyboard();
     keyboard_buffer_head = 0;
     keyboard_buffer_tail = 0;
+    pic_unmask(1);
     
     // Регистрируем драйвер в менеджере драйверов
     struct driver keyboard_driver;
