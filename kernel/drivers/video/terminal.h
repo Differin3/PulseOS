@@ -26,7 +26,8 @@ size_t terminal_get_row();
 size_t terminal_get_column();
 size_t terminal_get_height();
 size_t terminal_get_width();
-size_t terminal_content_height(); /* rows excluding status line */
+size_t terminal_content_height(); /* rows in content band (excludes header/status) */
+size_t terminal_content_origin(); /* first content row (1 when header on) */
 void terminal_set_row(size_t row);
 void terminal_set_column(size_t col);
 
@@ -37,8 +38,15 @@ void terminal_clear_viewport(void);
 void terminal_put_at(size_t row, size_t col, char c, uint8_t color);
 void terminal_write_at(size_t row, size_t col, const char* s, uint8_t color);
 
+/* Status bar (bottom). set() fills left zone for autotest compat. */
 void terminal_status_set(const char* text);
+void terminal_status_set_zones(const char* left, const char* mid, const char* right);
 void terminal_status_redraw(void);
+
+/* Header bar (top). */
+void terminal_header_set(const char* left, const char* right);
+void terminal_header_redraw(void);
+
 bool terminal_using_framebuffer(void);
 uint32_t terminal_fb_width(void);
 uint32_t terminal_fb_height(void);

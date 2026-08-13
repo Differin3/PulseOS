@@ -11,9 +11,10 @@ int vga_autotest_run(void) {
         return -1;
     }
 
+    size_t origin = terminal_content_origin();
     uint8_t color = 0x1E; /* yellow on blue */
-    terminal_put_at(0, 0, 'V', color);
-    int cell = terminal_read_cell(0, 0);
+    terminal_put_at(origin, 0, 'V', color);
+    int cell = terminal_read_cell(origin, 0);
     if (cell < 0 || (cell & 0xFF) != 'V' || ((cell >> 8) & 0xFF) != color) {
         log_fmt3(LOG_ERR, "autotest", "vga_failed_cell", "got", (uint32_t)cell, "ok", 0u, "x", 0u);
         return -2;
@@ -23,13 +24,22 @@ int vga_autotest_run(void) {
     terminal_status_redraw();
     size_t sr = h - 1;
     int sc = terminal_read_cell(sr, 0);
-    if (sc < 0 || (sc & 0xFF) != 'v') {
+    /* status_set paints a leading space then text — accept ' ' or 'v' at col 0 */
+    char sch = (char)(sc & 0xFF);
+    if (sc < 0 || (sch != 'v' && sch != ' ')) {
         log_msg(LOG_ERR, "autotest", "vga_failed_status");
         return -3;
     }
+    if (sch == ' ') {
+        int sc1 = terminal_read_cell(sr, 1);
+        if (sc1 < 0 || (sc1 & 0xFF) != 'v') {
+            log_msg(LOG_ERR, "autotest", "vga_failed_status");
+            return -3;
+        }
+    }
 
     terminal_clear_viewport();
-    int z = terminal_read_cell(0, 0);
+    int z = terminal_read_cell(origin, 0);
     if (z < 0 || (z & 0xFF) != ' ') {
         log_msg(LOG_ERR, "autotest", "vga_failed_clear");
         return -4;

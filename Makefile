@@ -70,7 +70,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o kernel/sched/switch.o kernel/sched/ta
 	kernel/drivers/pic/pic.o kernel/drivers/timer/pit.o \
 	kernel/drivers/input/keyboard.o kernel/drivers/video/terminal.o \
 	kernel/drivers/storage/ata.o kernel/drivers/storage/ahci.o kernel/drivers/storage/nvme.o \
-	kernel/drivers/pci/pci.o kernel/fs.o kernel/fs_autotest.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
+	kernel/drivers/pci/pci.o kernel/fs.o kernel/vfs.o kernel/fs_file.o kernel/fs_autotest.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
 	kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o \
 	kernel/syscall.o kernel/kernel_api.o \
 	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
@@ -159,6 +159,12 @@ kernel/drivers/pci/pci.o: $(PCI_SRC) kernel/drivers/pci/pci.h
 
 kernel/fs.o: $(FS_SRC) kernel/fs.h kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/fs.o $(FS_SRC)
+
+kernel/vfs.o: kernel/vfs.cpp kernel/vfs.h kernel/fs.h kernel/mount.h
+	$(CC) $(CFLAGS) -c -o kernel/vfs.o kernel/vfs.cpp
+
+kernel/fs_file.o: kernel/fs_file.cpp kernel/fs_file.h kernel/fs.h kernel/sched/task.h
+	$(CC) $(CFLAGS) -c -o kernel/fs_file.o kernel/fs_file.cpp
 
 kernel/fs_autotest.o: $(FS_AUTOTEST_SRC) kernel/fs_autotest.h kernel/fs.h kernel/serial_log.h
 	$(CC) $(CFLAGS) -c -o kernel/fs_autotest.o $(FS_AUTOTEST_SRC)

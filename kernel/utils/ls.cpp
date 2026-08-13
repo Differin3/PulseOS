@@ -47,7 +47,7 @@ static size_t ls_display_width(const struct ls_entry* e) {
     return w;
 }
 
-static void ls_print_name(const struct ls_entry* e, bool show_long) {
+static void ls_print_name(const struct ls_entry* e, bool show_long, const char* dir_path) {
     uint8_t old_color = terminal_getcolor();
     if (e->is_dir) {
         terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK));
@@ -65,7 +65,44 @@ static void ls_print_name(const struct ls_entry* e, bool show_long) {
 
     if (show_long) {
         terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-        terminal_writestring(e->is_dir ? "  <dir>" : "  <file>");
+        char full[160];
+        const char* base = dir_path ? dir_path : "/";
+        size_t p = 0;
+        while (base[p] && p + 1 < sizeof(full)) {
+            full[p] = base[p];
+            p++;
+        }
+        if (p > 0 && full[p - 1] != '/' && p + 1 < sizeof(full)) full[p++] = '/';
+        for (size_t k = 0; e->name[k] && p + 1 < sizeof(full); k++) full[p++] = e->name[k];
+        full[p] = 0;
+        struct fs_stat st;
+        if (fs_stat(full, &st) == 0) {
+            terminal_writestring("  mode=");
+            char mb[12]; int mi = 0; uint32_t m = st.mode;
+            if (!m) mb[mi++] = '0';
+            else {
+                char t[12]; int ti = 0;
+                while (m && ti < 11) { t[ti++] = (char)('0' + (m % 10)); m /= 10; }
+                while (ti > 0) mb[mi++] = t[--ti];
+            }
+            mb[mi] = 0;
+            terminal_writestring(mb);
+            terminal_writestring(" size=");
+            char sb[12]; int si = 0; uint32_t s = st.size;
+            if (!s) sb[si++] = '0';
+            else {
+                char t[12]; int ti = 0;
+                while (s && ti < 11) { t[ti++] = (char)('0' + (s % 10)); s /= 10; }
+                while (ti > 0) sb[si++] = t[--ti];
+            }
+            sb[si] = 0;
+            terminal_writestring(sb);
+            if (st.flags & FS_FLAG_DIRECTORY) terminal_writestring(" <dir>");
+            else if (st.flags & FS_FLAG_SYMLINK) terminal_writestring(" <lnk>");
+            else terminal_writestring(" <file>");
+        } else {
+            terminal_writestring(e->is_dir ? "  <dir>" : "  <file>");
+        }
     }
     terminal_setcolor(old_color);
 }
@@ -132,7 +169,7 @@ int cmd_ls(int argc, const char** argv) {
 
         struct ls_entry* e = &entries[entry_count++];
         int ni = 0;
-        for (const char* q = name_start; q < p && *q != '/' && ni < FS_FILENAME_LEN; q++) {
+        for (const char* q = name_start; q < p && *q != '/' && *q != '@' && ni < FS_FILENAME_LEN; q++) {
             e->name[ni++] = *q;
         }
         e->name[ni] = 0;
@@ -155,7 +192,7 @@ int cmd_ls(int argc, const char** argv) {
 
     if (show_long) {
         for (int i = 0; i < entry_count; i++) {
-            ls_print_name(&entries[i], true);
+            ls_print_name(&entries[i], true, list_path);
             terminal_writestring("\n");
         }
         return 0;
@@ -172,7 +209,7 @@ int cmd_ls(int argc, const char** argv) {
     if (ncols < 1) ncols = 1;
 
     for (int i = 0; i < entry_count; i++) {
-        ls_print_name(&entries[i], false);
+        ls_print_name(&entries[i], false, list_path);
         bool end_row = ((i + 1) % ncols == 0) || (i + 1 == entry_count);
         if (end_row) {
             terminal_writestring("\n");

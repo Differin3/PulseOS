@@ -187,6 +187,21 @@ fi
 if grep -q 'fs_failed\|fs FAIL' "$SERIAL_LOG" 2>/dev/null; then
     fail "FS autotest reported failure"
 fi
+if grep -q 'symlink_ok' "$SERIAL_LOG" 2>/dev/null; then
+    pass "symlink_ok"
+else
+    fail "no symlink_ok in serial log"
+fi
+if grep -q 'journal_ok' "$SERIAL_LOG" 2>/dev/null; then
+    pass "journal_ok"
+else
+    fail "no journal_ok in serial log"
+fi
+if grep -q 'fd_file_ok' "$SERIAL_LOG" 2>/dev/null; then
+    pass "fd_file_ok"
+else
+    fail "no fd_file_ok in serial log"
+fi
 if grep -q '\[INF\]\[fs\] init ok' "$SERIAL_LOG" 2>/dev/null; then
     pass "FS init ok at boot"
 else

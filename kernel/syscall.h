@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Номера системных вызовов
 #define SYS_READ        0
 #define SYS_WRITE       1
 #define SYS_OPEN        2
@@ -24,8 +23,10 @@
 #define SYS_EXIT        15
 #define SYS_YIELD       16
 #define SYS_RING3_DONE  17
+#define SYS_LSEEK       18
+#define SYS_STAT        19
+#define SYS_FSTAT       20
 
-// Структура для передачи параметров системного вызова
 struct syscall_args {
     uint32_t arg0;
     uint32_t arg1;
@@ -34,10 +35,7 @@ struct syscall_args {
     uint32_t arg4;
 };
 
-// Обработчик системных вызовов (вызывается из ассемблера)
 extern "C" int syscall_handler(struct syscall_args* args);
-
-// Инициализация системы системных вызовов
 void syscall_init();
 
 #endif

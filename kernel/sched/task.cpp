@@ -4,6 +4,7 @@
 #include "drivers/timer/pit.h"
 #include "drivers/network/socket.h"
 #include "drivers/network/core/net_ports.h"
+#include "fs_file.h"
 #include "mm/paging.h"
 #include <stddef.h>
 
@@ -386,6 +387,8 @@ int task_fd_close(int fd) {
     if (e->type == TASK_FD_NONE) return -1;
     if (e->type == TASK_FD_SOCK && e->handle >= 0) {
         socket_close(e->handle);
+    } else if (e->type == TASK_FD_FILE && e->handle >= 0) {
+        fs_ofile_release(e->handle);
     }
     e->type = TASK_FD_NONE;
     e->handle = -1;
@@ -397,7 +400,9 @@ void task_fd_close_all(struct task* t) {
     if (!t) return;
     for (int i = 0; i < TASK_FD_MAX; i++) {
         if (t->fds[i].type == TASK_FD_SOCK && t->fds[i].handle >= 0) {
-            /* sockets also closed by socket_close_by_pid; avoid double-close races */
+            t->fds[i].handle = -1;
+        } else if (t->fds[i].type == TASK_FD_FILE && t->fds[i].handle >= 0) {
+            fs_ofile_release(t->fds[i].handle);
             t->fds[i].handle = -1;
         }
         t->fds[i].type = TASK_FD_NONE;

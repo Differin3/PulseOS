@@ -12,11 +12,19 @@ static size_t terminal_column = 0;
 static uint8_t terminal_color = 0x07;
 static size_t term_cols = VGA_WIDTH;
 static size_t term_rows = VGA_HEIGHT;
-static size_t content_rows = VGA_HEIGHT - 1;
+static size_t content_rows = VGA_HEIGHT - 2;
+static size_t content_origin = 1;
 static bool use_fb = false;
 static bool status_enabled = true;
-static char status_text[128];
+static bool header_enabled = true;
+static char status_left[48];
+static char status_mid[64];
+static char status_right[48];
+static char header_left[64];
+static char header_right[48];
 static uint8_t status_color = 0x1F; /* white on blue */
+static uint8_t header_color = 0x0B; /* light cyan on black */
+static uint8_t header_dim = 0x07;   /* light grey on black */
 
 #define TERM_MAX_COLS 128
 #define TERM_MAX_ROWS 48
@@ -36,6 +44,34 @@ static struct {
 
 static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static void copy_cstr(char* dst, size_t cap, const char* src) {
+    size_t i = 0;
+    if (!src) src = "";
+    while (src[i] && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+static size_t cstr_len(const char* s) {
+    size_t n = 0;
+    if (!s) return 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static void recompute_layout(void) {
+    size_t chrome = 0;
+    if (!editor_mode) {
+        if (header_enabled) chrome++;
+        if (status_enabled) chrome++;
+    }
+    content_origin = (!editor_mode && header_enabled) ? 1 : 0;
+    if (term_rows > chrome) content_rows = term_rows - chrome;
+    else content_rows = term_rows > 0 ? 1 : 0;
 }
 
 static void vga_hw_cursor(size_t row, size_t col) {
@@ -78,8 +114,10 @@ static void set_cell(size_t row, size_t col, char c, uint8_t color) {
 }
 
 static void terminal_update_cursor() {
-    size_t max_r = editor_mode ? term_rows : content_rows;
+    size_t min_r = editor_mode ? 0 : content_origin;
+    size_t max_r = editor_mode ? term_rows : (content_origin + content_rows);
     if (max_r == 0) max_r = 1;
+    if (terminal_row < min_r) terminal_row = min_r;
     if (terminal_row >= max_r) terminal_row = max_r - 1;
     if (terminal_column >= term_cols) terminal_column = term_cols > 0 ? term_cols - 1 : 0;
     vga_hw_cursor(terminal_row, terminal_column);
@@ -100,29 +138,91 @@ static void history_push_row_cells(size_t row) {
     history_count++;
 }
 
-static void terminal_status_paint(void) {
-    if (!status_enabled || editor_mode) return;
-    size_t sr = term_rows - 1;
-    for (size_t col = 0; col < term_cols; col++) {
-        char ch = ' ';
-        if (col < sizeof(status_text) - 1 && status_text[col]) ch = status_text[col];
-        if (scrollback_mode && col + 6 < term_cols && col >= term_cols - 6) {
-            const char* ind = "SCROLL";
-            size_t i = col - (term_cols - 6);
-            if (i < 6) ch = ind[i];
-        }
-        set_cell(sr, col, ch, status_color);
+static void terminal_header_paint(void) {
+    if (!header_enabled || editor_mode || term_rows < 2) return;
+    size_t hr = 0;
+    for (size_t col = 0; col < term_cols; col++)
+        set_cell(hr, col, ' ', header_color);
+
+    size_t c = 0;
+    if (c < term_cols) set_cell(hr, c++, ' ', header_color);
+    for (size_t i = 0; header_left[i] && c < term_cols; i++)
+        set_cell(hr, c++, header_left[i], header_color);
+
+    size_t rlen = cstr_len(header_right);
+    if (rlen > 0 && term_cols > rlen + 1) {
+        size_t start = term_cols - rlen - 1;
+        for (size_t i = 0; i < rlen; i++)
+            set_cell(hr, start + i, header_right[i], header_dim);
     }
 }
 
-void terminal_status_set(const char* text) {
-    size_t i = 0;
-    if (!text) text = "";
-    while (text[i] && i + 1 < sizeof(status_text)) {
-        status_text[i] = text[i];
-        i++;
+static void terminal_status_paint(void) {
+    if (!status_enabled || editor_mode) return;
+    size_t sr = term_rows - 1;
+    for (size_t col = 0; col < term_cols; col++)
+        set_cell(sr, col, ' ', status_color);
+
+    size_t scroll_reserve = scrollback_mode ? 7 : 1;
+    size_t usable = term_cols > scroll_reserve ? term_cols - scroll_reserve : term_cols;
+    size_t col = 0;
+    if (col < usable) set_cell(sr, col++, ' ', status_color);
+
+    auto emit = [&](const char* s) {
+        if (!s) return;
+        while (*s && col < usable) set_cell(sr, col++, *s++, status_color);
+    };
+    auto sep = [&]() {
+        if (col + 3 <= usable) {
+            set_cell(sr, col++, ' ', status_color);
+            set_cell(sr, col++, '|', status_color);
+            set_cell(sr, col++, ' ', status_color);
+        }
+    };
+
+    emit(status_left);
+    if (status_mid[0] || status_right[0]) sep();
+    emit(status_mid);
+    if (status_right[0]) {
+        size_t rlen = cstr_len(status_right);
+        if (col + 3 + rlen <= usable) {
+            sep();
+            emit(status_right);
+        } else if (usable > rlen) {
+            size_t start = usable - rlen;
+            for (size_t i = 0; i < rlen; i++)
+                set_cell(sr, start + i, status_right[i], status_color);
+        }
     }
-    status_text[i] = 0;
+
+    if (scrollback_mode && term_cols >= 6) {
+        const char* ind = "SCROLL";
+        size_t base = term_cols - 6;
+        for (size_t i = 0; i < 6; i++) set_cell(sr, base + i, ind[i], status_color);
+    }
+}
+
+void terminal_header_set(const char* left, const char* right) {
+    copy_cstr(header_left, sizeof(header_left), left);
+    copy_cstr(header_right, sizeof(header_right), right);
+    terminal_header_paint();
+}
+
+void terminal_header_redraw(void) {
+    terminal_header_paint();
+}
+
+void terminal_status_set_zones(const char* left, const char* mid, const char* right) {
+    copy_cstr(status_left, sizeof(status_left), left);
+    copy_cstr(status_mid, sizeof(status_mid), mid);
+    copy_cstr(status_right, sizeof(status_right), right);
+    terminal_status_paint();
+}
+
+void terminal_status_set(const char* text) {
+    copy_cstr(status_left, sizeof(status_left), text);
+    status_mid[0] = 0;
+    status_right[0] = 0;
     terminal_status_paint();
 }
 
@@ -130,20 +230,26 @@ void terminal_status_redraw(void) {
     terminal_status_paint();
 }
 
+static void chrome_repaint(void) {
+    terminal_header_paint();
+    terminal_status_paint();
+}
+
 static void terminal_scroll_content(size_t lines) {
     if (lines == 0 || content_rows == 0) return;
+    size_t base = content_origin;
     for (size_t n = 0; n < lines; n++) {
-        history_push_row_cells(0);
+        history_push_row_cells(base);
         for (size_t row = 0; row + 1 < content_rows; row++) {
             for (size_t col = 0; col < term_cols; col++)
-                cells[row][col] = cells[row + 1][col];
-            paint_row(row);
+                cells[base + row][col] = cells[base + row + 1][col];
+            paint_row(base + row);
         }
-        size_t last = content_rows - 1;
+        size_t last = base + content_rows - 1;
         for (size_t col = 0; col < term_cols; col++)
             set_cell(last, col, ' ', terminal_color);
     }
-    terminal_status_paint();
+    chrome_repaint();
 }
 
 static void terminal_render_view(size_t first_line) {
@@ -154,6 +260,7 @@ static void terminal_render_view(size_t first_line) {
     }
     view_first_line = first_line;
     scrollback_mode = (first_line < history_count);
+    size_t base = content_origin;
 
     for (size_t row = 0; row < view_h; row++) {
         size_t line_idx = first_line + row;
@@ -163,14 +270,15 @@ static void terminal_render_view(size_t first_line) {
                 entry = history_lines[line_idx * TERM_MAX_COLS + col];
             } else {
                 size_t cr = line_idx - history_count;
-                entry = (cr < content_rows) ? cells[cr][col]
+                entry = (cr < content_rows) ? cells[base + cr][col]
                     : ((uint16_t)' ' | ((uint16_t)terminal_color << 8));
             }
-            backend_draw_cell(row, col, entry);
+            backend_draw_cell(base + row, col, entry);
+            cells[base + row][col] = entry;
         }
     }
-    terminal_status_paint();
-    terminal_row = content_rows > 0 ? content_rows - 1 : 0;
+    chrome_repaint();
+    terminal_row = base + (content_rows > 0 ? content_rows - 1 : 0);
     terminal_column = 0;
     terminal_update_cursor();
 }
@@ -179,8 +287,8 @@ static void terminal_exit_scrollback() {
     if (!scrollback_mode) return;
     scrollback_mode = false;
     view_first_line = history_count;
-    for (size_t row = 0; row < content_rows; row++) paint_row(row);
-    terminal_status_paint();
+    for (size_t row = 0; row < content_rows; row++) paint_row(content_origin + row);
+    chrome_repaint();
 }
 
 void terminal_scroll_up() {
@@ -223,7 +331,7 @@ void terminal_set_mode(size_t width, size_t height) {
     if (!use_fb) {
         term_cols = 80;
         term_rows = 25;
-        content_rows = status_enabled ? 24 : 25;
+        recompute_layout();
     }
     terminal_clear_viewport();
 }
@@ -277,10 +385,15 @@ void terminal_initialize() {
     use_fb = false;
     term_cols = 80;
     term_rows = 25;
-    content_rows = 24;
+    header_enabled = true;
     status_enabled = true;
-    status_text[0] = 0;
-    terminal_row = 0;
+    recompute_layout();
+    status_left[0] = 0;
+    status_mid[0] = 0;
+    status_right[0] = 0;
+    header_left[0] = 0;
+    header_right[0] = 0;
+    terminal_row = content_origin;
     terminal_column = 0;
     terminal_color = 0x07;
     history_count = 0;
@@ -296,6 +409,7 @@ void terminal_initialize() {
         VGA_MEMORY_PTR[i * 2] = 0x20;
         VGA_MEMORY_PTR[i * 2 + 1] = terminal_color;
     }
+    terminal_header_set("KnitOS", "text 80x25");
     terminal_status_set("KnitOS");
     terminal_update_cursor();
 
@@ -334,27 +448,52 @@ void terminal_init_graphics(uint32_t multiboot_info) {
     use_fb = true;
     term_cols = cols;
     term_rows = rows;
-    content_rows = rows > 1 ? rows - 1 : rows;
+    header_enabled = true;
+    status_enabled = true;
+    recompute_layout();
     fb_clear(0x000000);
     for (size_t r = 0; r < term_rows; r++)
         for (size_t c = 0; c < term_cols; c++)
             set_cell(r, c, ' ', terminal_color);
-    terminal_row = 0;
+    terminal_row = content_origin;
     terminal_column = 0;
-    terminal_status_set("KnitOS fb");
+
+    char right[40];
+    size_t n = 0;
+    auto putc_r = [&](char ch) { if (n + 1 < sizeof(right)) right[n++] = ch; };
+    auto put_u = [&](uint32_t v) {
+        char tmp[12]; int t = 0;
+        if (v == 0) tmp[t++] = '0';
+        else while (v && t < 11) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+        while (t > 0) putc_r(tmp[--t]);
+    };
+    putc_r('f'); putc_r('b'); putc_r(' ');
+    put_u(fi->width);
+    putc_r('x');
+    put_u(fi->height);
+    right[n] = 0;
+    terminal_header_set("KnitOS", right);
+    terminal_status_set("KnitOS");
     log_fmt3(LOG_INFO, "fb", "console", "cols", (uint32_t)term_cols,
              "rows", (uint32_t)term_rows, "ok", 1u);
 }
 
 void terminal_clear_viewport(void) {
     if (scrollback_mode) terminal_exit_scrollback();
-    size_t lim = editor_mode ? term_rows : content_rows;
-    for (size_t r = 0; r < lim; r++)
-        for (size_t c = 0; c < term_cols; c++)
-            set_cell(r, c, ' ', terminal_color);
-    terminal_row = 0;
+    if (editor_mode) {
+        for (size_t r = 0; r < term_rows; r++)
+            for (size_t c = 0; c < term_cols; c++)
+                set_cell(r, c, ' ', terminal_color);
+        terminal_row = 0;
+    } else {
+        size_t base = content_origin;
+        for (size_t r = 0; r < content_rows; r++)
+            for (size_t c = 0; c < term_cols; c++)
+                set_cell(base + r, c, ' ', terminal_color);
+        terminal_row = base;
+        chrome_repaint();
+    }
     terminal_column = 0;
-    terminal_status_paint();
     terminal_update_cursor();
 }
 
@@ -382,8 +521,10 @@ uint8_t terminal_getcolor() { return terminal_color; }
 
 void terminal_putchar(char c) {
     if (scrollback_mode) terminal_exit_scrollback();
-    size_t max_r = editor_mode ? term_rows : content_rows;
-    if (max_r == 0) max_r = 1;
+    size_t min_r = editor_mode ? 0 : content_origin;
+    size_t max_r = editor_mode ? term_rows : (content_origin + content_rows);
+    if (max_r <= min_r) max_r = min_r + 1;
+    if (terminal_row < min_r) terminal_row = min_r;
 
     if (c == '\n') {
         terminal_column = 0;
@@ -394,7 +535,7 @@ void terminal_putchar(char c) {
         }
     } else if (c == '\b') {
         if (terminal_column > 0) terminal_column--;
-        else if (terminal_row > 0) {
+        else if (terminal_row > min_r) {
             terminal_row--;
             terminal_column = term_cols - 1;
         }
@@ -434,6 +575,7 @@ size_t terminal_get_column() { return terminal_column; }
 size_t terminal_get_height() { return term_rows; }
 size_t terminal_get_width() { return term_cols; }
 size_t terminal_content_height() { return content_rows; }
+size_t terminal_content_origin() { return content_origin; }
 void terminal_set_row(size_t row) { terminal_row = row; terminal_update_cursor(); }
 void terminal_set_column(size_t col) { terminal_column = col; terminal_update_cursor(); }
 
@@ -445,6 +587,8 @@ void terminal_editor_begin() {
     editor_mode = true;
     scrollback_mode = false;
     status_enabled = false;
+    header_enabled = false;
+    recompute_layout();
     for (size_t r = 0; r < term_rows; r++)
         for (size_t c = 0; c < term_cols; c++)
             set_cell(r, c, ' ', terminal_color);
@@ -456,14 +600,17 @@ void terminal_editor_begin() {
 void terminal_editor_end() {
     editor_mode = false;
     status_enabled = true;
+    header_enabled = true;
+    recompute_layout();
     scrollback_mode = editor_saved.scrollback;
     view_first_line = editor_saved.view_first;
     if (editor_saved.scrollback) terminal_render_view(view_first_line);
     else {
-        for (size_t r = 0; r < content_rows; r++) paint_row(r);
-        terminal_status_paint();
+        for (size_t r = 0; r < content_rows; r++) paint_row(content_origin + r);
+        chrome_repaint();
     }
     terminal_row = editor_saved.row;
+    if (terminal_row < content_origin) terminal_row = content_origin;
     terminal_column = editor_saved.col;
     terminal_update_cursor();
 }

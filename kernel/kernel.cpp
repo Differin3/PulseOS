@@ -4,6 +4,8 @@
 #include "drivers/video/terminal.h"
 #include "drivers/storage/ata.h"
 #include "fs.h"
+#include "vfs.h"
+#include "fs_file.h"
 #include "fs_autotest.h"
 #include "utils.h"
 #include "utils/nano.h"
@@ -33,6 +35,7 @@
 #include "serial_log.h"
 #include "mm/paging.h"
 #include "vga_autotest.h"
+#include "heap.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -420,6 +423,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         log_msg(LOG_ERR, "boot", "fs skip: disk_init failed");
         print_status("FAIL", "Filesystem init failed", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
     } else if (fs_init(0) == 0) {
+        vfs_init();
         print_status("OK", "Filesystem initialized", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     } else {
         log_msg(LOG_ERR, "boot", "fs_init sector I/O failed");
@@ -490,55 +494,109 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
 
     /* Clear boot spam from viewport; keep details on serial */
     terminal_clear_viewport();
-    terminal_set_cursor(0, 0);
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
-    terminal_writestring(KERNEL_NAME);
-    terminal_writestring(" ");
-    terminal_writestring(KERNEL_VERSION);
-    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-    if (terminal_using_framebuffer()) {
-        terminal_writestring("  fb ");
-        shell_write_u32(terminal_fb_width());
-        terminal_writestring("x");
-        shell_write_u32(terminal_fb_height());
-    } else {
-        terminal_writestring("  text 80x25");
+
+    {
+        char hdr_left[48];
+        size_t hl = 0;
+        auto hput = [&](const char* s) {
+            while (*s && hl + 1 < sizeof(hdr_left)) hdr_left[hl++] = *s++;
+        };
+        hput(KERNEL_NAME);
+        hput(" ");
+        hput(KERNEL_VERSION);
+        hdr_left[hl] = 0;
+
+        char hdr_right[40];
+        size_t hr = 0;
+        auto rput = [&](const char* s) {
+            while (*s && hr + 1 < sizeof(hdr_right)) hdr_right[hr++] = *s++;
+        };
+        auto rput_u = [&](uint32_t v) {
+            char tmp[12]; int t = 0;
+            if (v == 0) tmp[t++] = '0';
+            else while (v && t < 11) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+            while (t > 0 && hr + 1 < sizeof(hdr_right)) hdr_right[hr++] = tmp[--t];
+        };
+        if (terminal_using_framebuffer()) {
+            rput("fb ");
+            rput_u(terminal_fb_width());
+            rput("x");
+            rput_u(terminal_fb_height());
+        } else {
+            rput("text 80x25");
+        }
+        hdr_right[hr] = 0;
+        terminal_header_set(hdr_left, hdr_right);
     }
-    terminal_writestring("  tasks=");
-    shell_write_u32((uint32_t)sched_task_count());
+
+    terminal_set_cursor(terminal_content_origin(), 0);
+    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    terminal_writestring("modular hobby kernel");
     terminal_putchar('\n');
-    
+    terminal_setcolor(vga_entry_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK));
+    for (int i = 0; i < 36; i++) terminal_putchar('-');
+    terminal_putchar('\n');
+    terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    terminal_writestring("Net ");
+    {
+        char ipbuf[20];
+        ip_format_address(ip_get_our_ip(), ipbuf, sizeof(ipbuf));
+        terminal_writestring(ipbuf[0] ? ipbuf : "0.0.0.0");
+    }
+    terminal_writestring("   tasks ");
+    shell_write_u32((uint32_t)sched_task_count());
+    terminal_writestring("   disk ready");
+    terminal_putchar('\n');
+    terminal_putchar('\n');
+
     char line[128];
     size_t line_len = 0;
     size_t prompt_row = terminal_get_row();
     size_t prompt_col = 0;
 
     auto refresh_status_line = [&]() {
-        char buf[96];
-        size_t n = 0;
-        auto put = [&](const char* s) {
-            while (*s && n + 1 < sizeof(buf)) buf[n++] = *s++;
+        char mid[64];
+        size_t m = 0;
+        auto mput = [&](const char* s) {
+            while (*s && m + 1 < sizeof(mid)) mid[m++] = *s++;
         };
-        auto put_u = [&](uint32_t v) {
+        const char* cwd = utils_get_current_directory();
+        mput(cwd ? cwd : "/");
+        mput(" | ");
+        char ipb[20];
+        ip_format_address(ip_get_our_ip(), ipb, sizeof(ipb));
+        mput(ipb[0] ? ipb : "0.0.0.0");
+        mid[m] = 0;
+
+        char right[48];
+        size_t r = 0;
+        auto rput = [&](const char* s) {
+            while (*s && r + 1 < sizeof(right)) right[r++] = *s++;
+        };
+        auto rput_u = [&](uint32_t v) {
             char tmp[12]; int t = 0;
             if (v == 0) tmp[t++] = '0';
             else while (v && t < 11) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
-            while (t > 0 && n + 1 < sizeof(buf)) buf[n++] = tmp[--t];
+            while (t > 0 && r + 1 < sizeof(right)) right[r++] = tmp[--t];
         };
-        put("up=");
-        put_u(timer_ms() / 1000);
-        put("s ip=");
-        char ipb[20];
-        ip_format_address(ip_get_our_ip(), ipb, sizeof(ipb));
-        put(ipb[0] ? ipb : "0.0.0.0");
-        put(" httpd=");
-        put_u((uint32_t)(http_server_pid() < 0 ? 0 : http_server_pid()));
-        put(" dhcpd=");
-        put_u((uint32_t)(dhcp_service_pid() < 0 ? 0 : dhcp_service_pid()));
-        buf[n] = 0;
-        terminal_status_set(buf);
+        rput("up ");
+        rput_u(timer_ms() / 1000);
+        rput("s | t=");
+        rput_u((uint32_t)sched_task_count());
+        int httpd = http_server_pid();
+        int dhcpd = dhcp_service_pid();
+        if (httpd >= 0) {
+            rput(" httpd=");
+            rput_u((uint32_t)httpd);
+        }
+        if (dhcpd >= 0) {
+            rput(" dhcpd=");
+            rput_u((uint32_t)dhcpd);
+        }
+        right[r] = 0;
+        terminal_status_set_zones(KERNEL_NAME, mid, right);
     };
-    
+
     auto prompt_print = [&]() {
         refresh_status_line();
         terminal_set_cursor(prompt_row, 0);
@@ -554,23 +612,19 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         terminal_setcolor(old);
         prompt_col = terminal_get_column();
     };
-    
+
     prompt_print();
-    
+
     auto flush_line = [&]() {
         terminal_putchar('\n');
         line_len = 0;
         prompt_row = terminal_get_row();
         prompt_print();
     };
-    
+
     auto cmd_clear = [&]() {
         terminal_clear_viewport();
-        terminal_set_cursor(0, 0);
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
-        terminal_writestring(KERNEL_NAME);
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-        terminal_putchar('\n');
+        terminal_set_cursor(terminal_content_origin(), 0);
         prompt_row = terminal_get_row();
         prompt_print();
     };
@@ -759,8 +813,9 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\nFiles:");
             terminal_writestring("\n  ls [path] [-l] [-a]     list directory");
             terminal_writestring("\n  find [path] [-name P] [-type f|d]  search files");
-            terminal_writestring("\n  cd <path>   pwd   cat <file>   rm <file>");
-            terminal_writestring("\n  write <file> <text>   nano <file>  full-screen editor");
+            terminal_writestring("\n  cd <path>   pwd   cat <file>   rm [-r] <path>");
+            terminal_writestring("\n  write <file> <text>   nano <file>  mkdir [-p] <path>");
+            terminal_writestring("\n  mv <a> <b>   cp <a> <b>   ln -s <t> <link>   stat <path>");
             terminal_writestring("\nSystem:");
             terminal_writestring("\n  clear   echo   version   disk   reboot   shutdown");
             terminal_writestring("\n  ps                     tasks (systemd=0, idle, ...)");
@@ -1177,25 +1232,124 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             }
         }
         
-        const char pref_rm[]="rm ";
-        if (len>=4) {
-            bool ok=true; for(int i=0;i<3;i++) if(cmd[i]!=pref_rm[i]) {ok=false; break;}
-            if (ok) {
-                char filename[64]; int fn_len=0;
-                for(size_t i=3;i<len && fn_len<63;i++) filename[fn_len++]=cmd[i];
-                filename[fn_len]=0;
-                char fullpath[128];
-                if (utils_resolve_path(filename, fullpath, sizeof(fullpath)) != 0) {
-                    terminal_writestring("\nInvalid path");
-                    flush_line(); return;
-                }
-                if (fs_delete(fullpath) == 0) {
-                    terminal_writestring("\nFile deleted");
-                } else {
-                    terminal_writestring("\nError deleting file");
-                }
+        if (len>=3 && cmd[0]=='r'&&cmd[1]=='m'&&(len==2 || cmd[2]==' ')) {
+            bool recursive = false;
+            size_t i = 2;
+            while (i < len && cmd[i]==' ') i++;
+            if (i + 2 < len && cmd[i]=='-' && cmd[i+1]=='r') {
+                recursive = true;
+                i += 2;
+                while (i < len && cmd[i]==' ') i++;
+            }
+            char filename[64]; int fn_len=0;
+            for (; i < len && fn_len < 63; i++) filename[fn_len++]=cmd[i];
+            filename[fn_len]=0;
+            if (fn_len == 0) {
+                terminal_writestring("\nUsage: rm [-r] <path>");
                 flush_line(); return;
             }
+            char fullpath[128];
+            if (utils_resolve_path(filename, fullpath, sizeof(fullpath)) != 0) {
+                terminal_writestring("\nInvalid path");
+                flush_line(); return;
+            }
+            if (fullpath[0]=='/' && fullpath[1]==0) {
+                terminal_writestring("\nrm: refuse to remove /");
+                flush_line(); return;
+            }
+            int rc = recursive ? fs_rm_rf(fullpath) : fs_delete(fullpath);
+            terminal_writestring(rc == 0 ? "\nDeleted" : "\nError deleting");
+            flush_line(); return;
+        }
+        if (len>=3 && cmd[0]=='m'&&cmd[1]=='v'&&cmd[2]==' ') {
+            char a[64], b[64]; int an=0, bn=0; size_t i=3;
+            while (i<len && cmd[i]!=' ' && an<63) a[an++]=cmd[i++];
+            a[an]=0;
+            while (i<len && cmd[i]==' ') i++;
+            while (i<len && bn<63) b[bn++]=cmd[i++];
+            b[bn]=0;
+            char pa[128], pb[128];
+            if (!an || !bn || utils_resolve_path(a,pa,sizeof(pa)) || utils_resolve_path(b,pb,sizeof(pb))) {
+                terminal_writestring("\nUsage: mv <src> <dst>");
+                flush_line(); return;
+            }
+            terminal_writestring(fs_rename(pa,pb)==0 ? "\nMoved" : "\nmv failed");
+            flush_line(); return;
+        }
+        if (len>=3 && cmd[0]=='c'&&cmd[1]=='p'&&cmd[2]==' ') {
+            char a[64], b[64]; int an=0, bn=0; size_t i=3;
+            while (i<len && cmd[i]!=' ' && an<63) a[an++]=cmd[i++];
+            a[an]=0;
+            while (i<len && cmd[i]==' ') i++;
+            while (i<len && bn<63) b[bn++]=cmd[i++];
+            b[bn]=0;
+            char pa[128], pb[128];
+            if (!an || !bn || utils_resolve_path(a,pa,sizeof(pa)) || utils_resolve_path(b,pb,sizeof(pb))) {
+                terminal_writestring("\nUsage: cp <src> <dst>");
+                flush_line(); return;
+            }
+            uint32_t sz=0;
+            if (fs_open(pa,&sz)!=0) { terminal_writestring("\ncp: src missing"); flush_line(); return; }
+            char* buf = (char*)malloc(sz ? sz : 1);
+            if (!buf) { terminal_writestring("\ncp: oom"); flush_line(); return; }
+            if (sz && fs_read(pa, buf, sz) < 0) { free(buf); terminal_writestring("\ncp: read fail"); flush_line(); return; }
+            int w = fs_write(pb, buf, sz);
+            free(buf);
+            terminal_writestring(w==0 ? "\nCopied" : "\ncp failed");
+            flush_line(); return;
+        }
+        if (len>=6 && cmd[0]=='l'&&cmd[1]=='n'&&cmd[2]==' '&&cmd[3]=='-'&&cmd[4]=='s'&&cmd[5]==' ') {
+            char a[64], b[64]; int an=0, bn=0; size_t i=6;
+            while (i<len && cmd[i]!=' ' && an<63) a[an++]=cmd[i++];
+            a[an]=0;
+            while (i<len && cmd[i]==' ') i++;
+            while (i<len && bn<63) b[bn++]=cmd[i++];
+            b[bn]=0;
+            char pb[128];
+            if (!an || !bn || utils_resolve_path(b,pb,sizeof(pb))) {
+                terminal_writestring("\nUsage: ln -s <target> <link>");
+                flush_line(); return;
+            }
+            terminal_writestring(fs_symlink(a,pb)==0 ? "\nSymlink created" : "\nln failed");
+            flush_line(); return;
+        }
+        if (len>=5 && cmd[0]=='s'&&cmd[1]=='t'&&cmd[2]=='a'&&cmd[3]=='t'&&cmd[4]==' ') {
+            char filename[64]; int fn=0;
+            for (size_t i=5;i<len&&fn<63;i++) filename[fn++]=cmd[i];
+            filename[fn]=0;
+            char fullpath[128];
+            if (utils_resolve_path(filename, fullpath, sizeof(fullpath)) != 0) {
+                terminal_writestring("\nInvalid path"); flush_line(); return;
+            }
+            struct fs_stat st;
+            if (fs_stat(fullpath, &st) != 0) {
+                terminal_writestring("\nstat: not found"); flush_line(); return;
+            }
+            terminal_writestring("\n  path: "); terminal_writestring(fullpath);
+            terminal_writestring("\n  size: "); shell_write_u32(st.size);
+            terminal_writestring("\n  mode: "); shell_write_u32(st.mode);
+            terminal_writestring("\n  mtime: "); shell_write_u32(st.mtime);
+            if (st.flags & FS_FLAG_DIRECTORY) terminal_writestring("\n  type: dir");
+            else if (st.flags & FS_FLAG_SYMLINK) terminal_writestring("\n  type: symlink");
+            else terminal_writestring("\n  type: file");
+            flush_line(); return;
+        }
+        if (len>=6 && cmd[0]=='m'&&cmd[1]=='k'&&cmd[2]=='d'&&cmd[3]=='i'&&cmd[4]=='r'&&cmd[5]==' ') {
+            char filename[64]; int fn=0; size_t i=6;
+            bool parents = false;
+            if (i+2 < len && cmd[i]=='-' && cmd[i+1]=='p') {
+                parents = true; i += 2;
+                while (i < len && cmd[i]==' ') i++;
+            }
+            (void)parents; /* create_dir always makes parents */
+            for (; i<len&&fn<63;i++) filename[fn++]=cmd[i];
+            filename[fn]=0;
+            char fullpath[128];
+            if (!fn || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
+                terminal_writestring("\nUsage: mkdir [-p] <path>"); flush_line(); return;
+            }
+            terminal_writestring(fs_create_dir(fullpath)==0 ? "\nDirectory created" : "\nmkdir failed");
+            flush_line(); return;
         }
         if (len==4 && cmd[0]=='t'&&cmd[1]=='e'&&cmd[2]=='s'&&cmd[3]=='t') {
             terminal_writestring("\nTesting scroll - printing 100 lines...");
@@ -1298,7 +1452,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                     terminal_writestring(buf);
                     terminal_writestring("...");
                     terminal_set_mode(width, height);
-                    terminal_set_cursor(0, 0);
+                    terminal_set_cursor(terminal_content_origin(), 0);
                     terminal_writestring("\n[OK ] Resolution set to 80x");
                     terminal_writestring(buf);
                     flush_line();

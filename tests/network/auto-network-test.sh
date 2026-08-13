@@ -282,6 +282,9 @@ def serial_summary(text):
         ("[INF][http] idle_done", "HTTP idle shutdown"),
         ("fs_ok", "Filesystem autotest passed"),
         ("fs_failed", "Filesystem autotest failed"),
+        ("symlink_ok", "FS symlink follow"),
+        ("journal_ok", "FS journal recover selftest"),
+        ("fd_file_ok", "FS open/lseek/read fd API"),
         ("dhcp_ok", "DHCP acquired in autotest"),
         ("dns_ok", "DNS resolve knitos.local"),
         ("ports_ok", "Port table autotest passed"),
@@ -624,6 +627,9 @@ fi
 if grep -q 'PIT timer' "$SERIAL_LOG" 2>/dev/null; then pass "PIT timer boot line"; else echo "[WARN] no PIT timer status in log (VGA-only OK)"; fi
 if grep -qE 'fs_ok|\[AUTOTEST\] fs ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS autotest marker"; else fail "no fs_ok in log"; fi
 if grep -q 'fs_failed\|fs FAIL' "$SERIAL_LOG" 2>/dev/null; then fail "FS autotest reported failure"; fi
+if grep -q 'symlink_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS symlink marker"; else fail "no symlink_ok in log"; fi
+if grep -q 'journal_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS journal marker"; else fail "no journal_ok in log"; fi
+if grep -q 'fd_file_ok' "$SERIAL_LOG" 2>/dev/null; then pass "FS fd API marker"; else fail "no fd_file_ok in log"; fi
 if grep -q 'dhcp_ok\|dhcp ok' "$SERIAL_LOG" 2>/dev/null; then pass "DHCP autotest marker"; else echo "[WARN] no dhcp_ok in log"; fi
 if grep -q 'dns_ok\|dns ok' "$SERIAL_LOG" 2>/dev/null; then pass "DNS autotest marker"; else fail "no dns_ok in log"; fi
 if grep -q 'ports_ok' "$SERIAL_LOG" 2>/dev/null; then pass "Ports autotest marker"; else fail "no ports_ok in log"; fi
