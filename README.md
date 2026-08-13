@@ -1,8 +1,5 @@
-<<<<<<< HEAD
+
 # KnitOS
-=======
-# Fimora OS
->>>>>>> origin/main
 
 32-bit x86 hobby kernel (v0.2.5) with GRUB Multiboot2 boot, custom MOS filesystem, storage/network drivers, and an interactive shell.
 
