@@ -146,8 +146,28 @@ static void fb_put_pixel(uint32_t x, uint32_t y, uint32_t rgb) {
     }
 }
 
+/* Prefer 1x; zoom only if 1x would exceed console buffer limits. */
+static uint8_t fb_pick_scale(uint32_t w, uint32_t h) {
+    const uint32_t max_cols = 240;
+    const uint32_t max_rows = 68;
+    uint32_t cols1 = w / FB_FONT_W;
+    uint32_t rows1 = h / FB_FONT_H;
+    if (cols1 <= max_cols && rows1 <= max_rows) return 1;
+
+    for (uint8_t s = 2; s <= 4; s++) {
+        uint32_t cols = w / (FB_FONT_W * s);
+        uint32_t rows = h / (FB_FONT_H * s);
+        if (cols >= 40 && rows >= 10 && cols <= max_cols && rows <= max_rows)
+            return s;
+    }
+    return 1;
+}
+
 bool fb_init_from_multiboot(uint32_t mbi_addr) {
     g_fb.active = false;
+    g_fb.scale = 1;
+    g_fb.origin_x = 0;
+    g_fb.origin_y = 0;
     if (!mbi_addr) return false;
 
     uint32_t total = *(uint32_t*)mbi_addr;
@@ -167,6 +187,7 @@ bool fb_init_from_multiboot(uint32_t mbi_addr) {
                 g_fb.width = fb->width;
                 g_fb.height = fb->height;
                 g_fb.bpp = fb->bpp;
+                g_fb.scale = fb_pick_scale(g_fb.width, g_fb.height);
                 /* Map framebuffer into page tables (often above 128MB). */
                 uint32_t bytes = g_fb.pitch * g_fb.height;
                 if (bytes < g_fb.width * g_fb.height * (g_fb.bpp / 8))
@@ -174,6 +195,8 @@ bool fb_init_from_multiboot(uint32_t mbi_addr) {
                 paging_map_physical(addr32, bytes + 0x1000);
                 g_fb.active = true;
                 log_fmt3(LOG_INFO, "fb", "framebuffer", "w", g_fb.width, "h", g_fb.height, "bpp", g_fb.bpp);
+                log_fmt3(LOG_INFO, "fb", "scale", "zoom", (uint32_t)g_fb.scale,
+                         "cell_w", fb_cell_width(), "cell_h", fb_cell_height());
                 return true;
             }
         }
@@ -192,6 +215,25 @@ bool fb_active(void) {
     return g_fb.active;
 }
 
+uint8_t fb_scale(void) {
+    return g_fb.active ? g_fb.scale : 1;
+}
+
+uint32_t fb_cell_width(void) {
+    uint8_t s = g_fb.scale ? g_fb.scale : 1;
+    return (uint32_t)FB_FONT_W * s;
+}
+
+uint32_t fb_cell_height(void) {
+    uint8_t s = g_fb.scale ? g_fb.scale : 1;
+    return (uint32_t)FB_FONT_H * s;
+}
+
+void fb_set_console_origin(uint32_t origin_x, uint32_t origin_y) {
+    g_fb.origin_x = origin_x;
+    g_fb.origin_y = origin_y;
+}
+
 void fb_clear(uint32_t rgb) {
     if (!g_fb.active) return;
     for (uint32_t y = 0; y < g_fb.height; y++) {
@@ -205,9 +247,12 @@ void fb_fill_cell(size_t cell_x, size_t cell_y, uint8_t vga_color) {
 
 void fb_draw_glyph(size_t cell_x, size_t cell_y, char c, uint8_t vga_color) {
     if (!g_fb.active) return;
-    uint32_t px = (uint32_t)cell_x * FB_FONT_W;
-    uint32_t py = (uint32_t)cell_y * FB_FONT_H;
-    if (px + FB_FONT_W > g_fb.width || py + FB_FONT_H > g_fb.height) return;
+    uint8_t s = g_fb.scale ? g_fb.scale : 1;
+    uint32_t cw = (uint32_t)FB_FONT_W * s;
+    uint32_t ch = (uint32_t)FB_FONT_H * s;
+    uint32_t px = g_fb.origin_x + (uint32_t)cell_x * cw;
+    uint32_t py = g_fb.origin_y + (uint32_t)cell_y * ch;
+    if (px + cw > g_fb.width || py + ch > g_fb.height) return;
 
     uint32_t fg = vga_to_rgb(vga_color & 0x0F);
     uint32_t bg = vga_to_rgb((vga_color >> 4) & 0x0F);
@@ -221,7 +266,11 @@ void fb_draw_glyph(size_t cell_x, size_t cell_y, char c, uint8_t vga_color) {
         for (int dy = 0; dy < 2; dy++) {
             for (int col = 0; col < 8; col++) {
                 uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
-                fb_put_pixel(px + (uint32_t)col, py + (uint32_t)(row * 2 + dy), color);
+                uint32_t bx = px + (uint32_t)col * s;
+                uint32_t by = py + (uint32_t)(row * 2 + dy) * s;
+                for (uint8_t sy = 0; sy < s; sy++)
+                    for (uint8_t sx = 0; sx < s; sx++)
+                        fb_put_pixel(bx + sx, by + sy, color);
             }
         }
     }

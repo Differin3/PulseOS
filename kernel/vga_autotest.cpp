@@ -52,7 +52,8 @@ int vga_autotest_run(void) {
         uint32_t fw = terminal_fb_width();
         uint32_t fh = terminal_fb_height();
         uint32_t bpp = terminal_fb_bpp();
-        if (fw < 1024 || fh < 768 || bpp < 24) {
+        /* Accept any usable RGB mode; preferred request is 1600x900. */
+        if (fw < 640 || fh < 480 || bpp < 24) {
             log_fmt3(LOG_ERR, "autotest", "fb_failed", "w", fw, "h", fh, "bpp", bpp);
             return -5;
         }

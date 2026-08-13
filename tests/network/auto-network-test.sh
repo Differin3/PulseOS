@@ -312,7 +312,7 @@ def serial_summary(text):
         ("dhcpd_kthread_ok", "dhcpd runs as kthread"),
         ("aspace_ok", "Per-task CR3 isolation"),
         ("vga_ok", "VGA console autotest"),
-        ("fb_ok", "Framebuffer 1024x768"),
+        ("fb_ok", "Framebuffer graphics mode"),
         ("fb_skip", "Framebuffer skipped (text mode)"),
         ("[INF][sched] init", "Scheduler init"),
         ("[INF][sched] create", "Scheduler task create"),

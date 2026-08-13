@@ -26,8 +26,9 @@ static uint8_t status_color = 0x1F; /* white on blue */
 static uint8_t header_color = 0x0B; /* light cyan on black */
 static uint8_t header_dim = 0x07;   /* light grey on black */
 
-#define TERM_MAX_COLS 128
-#define TERM_MAX_ROWS 48
+/* Headroom for 1920x1080 @1x (240x67) and similar modes. */
+#define TERM_MAX_COLS 240
+#define TERM_MAX_ROWS 68
 #define SCROLLBACK_SIZE 200
 
 static uint16_t cells[TERM_MAX_ROWS][TERM_MAX_COLS];
@@ -438,12 +439,40 @@ void terminal_init_graphics(uint32_t multiboot_info) {
         return;
     }
     const struct fb_info* fi = fb_get_info();
-    size_t cols = fi->width / FB_FONT_W;
-    size_t rows = fi->height / FB_FONT_H;
+    uint32_t cell_w = fb_cell_width();
+    uint32_t cell_h = fb_cell_height();
+    if (cell_w == 0) cell_w = FB_FONT_W;
+    if (cell_h == 0) cell_h = FB_FONT_H;
+
+    /*
+     * Keep the status row away from the physical bottom: QEMU/windowed hosts
+     * often crop a strip (taskbar / window chrome). Reserve ~3 rows.
+     */
+    uint32_t bottom_pad = cell_h * 3;
+    if (bottom_pad < 48) bottom_pad = 48;
+    uint32_t usable_w = fi->width;
+    uint32_t usable_h = fi->height;
+    if (usable_h > bottom_pad + cell_h * 12)
+        usable_h -= bottom_pad;
+
+    size_t cols = usable_w / cell_w;
+    size_t rows = usable_h / cell_h;
     if (cols > TERM_MAX_COLS) cols = TERM_MAX_COLS;
     if (rows > TERM_MAX_ROWS) rows = TERM_MAX_ROWS;
     if (cols < 40) cols = 40;
     if (rows < 10) rows = 10;
+
+    uint32_t grid_w = (uint32_t)cols * cell_w;
+    uint32_t grid_h = (uint32_t)rows * cell_h;
+    uint32_t ox = 0;
+    uint32_t oy = 0;
+    if (fi->width > grid_w) ox = (fi->width - grid_w) / 2;
+    /* Top-align; unused space stays below so status sits higher. */
+    if (fi->height > grid_h + bottom_pad)
+        oy = 0;
+    else if (fi->height > grid_h)
+        oy = 0;
+    fb_set_console_origin(ox, oy);
 
     use_fb = true;
     term_cols = cols;
@@ -458,7 +487,7 @@ void terminal_init_graphics(uint32_t multiboot_info) {
     terminal_row = content_origin;
     terminal_column = 0;
 
-    char right[40];
+    char right[48];
     size_t n = 0;
     auto putc_r = [&](char ch) { if (n + 1 < sizeof(right)) right[n++] = ch; };
     auto put_u = [&](uint32_t v) {
@@ -467,15 +496,19 @@ void terminal_init_graphics(uint32_t multiboot_info) {
         else while (v && t < 11) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
         while (t > 0) putc_r(tmp[--t]);
     };
-    putc_r('f'); putc_r('b'); putc_r(' ');
     put_u(fi->width);
     putc_r('x');
     put_u(fi->height);
+    if (fi->scale > 1) {
+        putc_r(' ');
+        putc_r('x');
+        put_u(fi->scale);
+    }
     right[n] = 0;
     terminal_header_set("KnitOS", right);
     terminal_status_set("KnitOS");
     log_fmt3(LOG_INFO, "fb", "console", "cols", (uint32_t)term_cols,
-             "rows", (uint32_t)term_rows, "ok", 1u);
+             "rows", (uint32_t)term_rows, "zoom", (uint32_t)fi->scale);
 }
 
 void terminal_clear_viewport(void) {
@@ -510,6 +543,7 @@ bool terminal_using_framebuffer(void) { return use_fb; }
 uint32_t terminal_fb_width(void) { return fb_active() ? fb_get_info()->width : 80; }
 uint32_t terminal_fb_height(void) { return fb_active() ? fb_get_info()->height : 25; }
 uint32_t terminal_fb_bpp(void) { return fb_active() ? fb_get_info()->bpp : 4; }
+uint32_t terminal_fb_scale(void) { return fb_active() ? (uint32_t)fb_scale() : 1u; }
 
 int terminal_read_cell(size_t row, size_t col) {
     if (row >= term_rows || col >= term_cols) return -1;

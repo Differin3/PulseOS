@@ -9,13 +9,13 @@ header_start:
     dd header_end - header_start
     dd -(0xe85250d6 + 0 + (header_end - header_start))
 
-    ; Framebuffer tag: prefer 1024x768x32
+    ; Framebuffer tag: prefer 1600x900x32 (kernel auto-fits)
     align 8
     dw 5                         ; type = framebuffer
     dw 0                         ; flags
     dd 20                        ; size
-    dd 1024                      ; width
-    dd 768                       ; height
+    dd 1600                      ; width
+    dd 900                       ; height
     dd 32                        ; depth
 
     align 8

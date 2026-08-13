@@ -51,6 +51,7 @@ bool terminal_using_framebuffer(void);
 uint32_t terminal_fb_width(void);
 uint32_t terminal_fb_height(void);
 uint32_t terminal_fb_bpp(void);
+uint32_t terminal_fb_scale(void);
 
 /* Read cell for autotest: returns char in low 8, attr in high 8; -1 on fail */
 int terminal_read_cell(size_t row, size_t col);

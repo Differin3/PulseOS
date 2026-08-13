@@ -267,7 +267,27 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     terminal_init_graphics(multiboot_info);
     terminal_set_cursor(current_row, 0);
     if (terminal_using_framebuffer()) {
-        print_status("OK", "Paging + FB 1024x768", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+        char fbmsg[48];
+        size_t n = 0;
+        auto putc = [&](char ch) { if (n + 1 < sizeof(fbmsg)) fbmsg[n++] = ch; };
+        auto put_u = [&](uint32_t v) {
+            char tmp[12]; int t = 0;
+            if (v == 0) tmp[t++] = '0';
+            else while (v && t < 11) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+            while (t > 0) putc(tmp[--t]);
+        };
+        const char* pfx = "Paging + FB ";
+        while (*pfx) putc(*pfx++);
+        put_u(terminal_fb_width());
+        putc('x');
+        put_u(terminal_fb_height());
+        if (terminal_fb_scale() > 1) {
+            putc(' ');
+            putc('x');
+            put_u(terminal_fb_scale());
+        }
+        fbmsg[n] = 0;
+        print_status("OK", fbmsg, vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     } else {
         print_status("OK", "Paging (VGA text 80x25)", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     }

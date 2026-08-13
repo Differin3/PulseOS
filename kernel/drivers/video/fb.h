@@ -11,6 +11,9 @@ struct fb_info {
     uint32_t width;
     uint32_t height;
     uint8_t bpp;
+    uint8_t scale; /* integer glyph zoom; usually 1, up only if needed */
+    uint32_t origin_x; /* pixel offset of cell (0,0) */
+    uint32_t origin_y;
     bool active;
 };
 
@@ -19,6 +22,11 @@ bool fb_init_from_multiboot(uint32_t mbi_addr);
 
 const struct fb_info* fb_get_info(void);
 bool fb_active(void);
+uint8_t fb_scale(void);
+uint32_t fb_cell_width(void);
+uint32_t fb_cell_height(void);
+/* Place the text grid inside the FB (centers + keeps bottom status on-screen). */
+void fb_set_console_origin(uint32_t origin_x, uint32_t origin_y);
 
 void fb_clear(uint32_t rgb);
 void fb_draw_glyph(size_t cell_x, size_t cell_y, char c, uint8_t vga_color);
